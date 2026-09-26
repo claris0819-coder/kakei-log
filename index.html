@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>家計簿クイック入力</title>
+<meta name="theme-color" content="#1B2030">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="家計簿">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root {
+    --navy: #1B2030;
+    --blue: #3457D5;
+    --blue-soft: #E8ECFC;
+    --gray-soft: #ECEDF4;
+    --border: #DFE2EA;
+    --white: #FFFFFF;
+    --muted: #8A90A3;
+    --good: #21935E;
+    --good-soft: #E3F5EC;
+    --warn: #A4700A;
+    --warn-soft: #FBF0DC;
+    --bad: #C43D34;
+    --bad-soft: #FBE7E5;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, "Hiragino Sans", "Yu Gothic", "Meiryo", "Segoe UI", sans-serif;
+    color: var(--navy);
+    background: var(--gray-soft);
+  }
+  header {
+    background: var(--navy);
+    color: #fff;
+    padding: 14px 16px;
+    padding-top: calc(14px + env(safe-area-inset-top));
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+  main { padding: 14px; max-width: 480px; margin: 0 auto; padding-bottom: 60px; }
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card h2 { font-size: 13px; margin: 0 0 10px 0; font-weight: 700; color: var(--muted); }
+  .kpi-row { display: flex; gap: 8px; }
+  .kpi { flex: 1; text-align: center; }
+  .kpi .label { font-size: 11px; color: var(--muted); }
+  .kpi .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .kpi .value.bad { color: var(--bad); }
+  .kpi .value.good { color: var(--good); }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=text], input[type=number], input[type=date] {
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 16px; /* 16px未満だとiPhoneで入力時に画面が拡大されるため */
+    font-family: inherit;
+    background: #fff;
+    color: var(--navy);
+  }
+  .row2 { display: flex; gap: 8px; }
+  .row2 > div { flex: 1; }
+  button.btn {
+    width: 100%;
+    background: var(--blue);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 13px 16px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  button.btn:disabled { opacity: 0.5; }
+  button.btn.ghost {
+    background: var(--gray-soft);
+    color: var(--navy);
+    margin-top: 8px;
+  }
+  .msg { font-size: 13px; margin-top: 10px; padding: 8px 10px; border-radius: 6px; display: none; }
+  .msg.ok { display: block; background: var(--good-soft); color: var(--good); }
+  .msg.err { display: block; background: var(--bad-soft); color: var(--bad); }
+  .edit-banner {
+    background: var(--blue-soft);
+    color: var(--blue);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .edit-banner button {
+    background: none;
+    border: none;
+    color: var(--blue);
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+    font-weight: 700;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table th, table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  table th { color: var(--muted); font-weight: 700; font-size: 11px; }
+  .bar-outer { background: var(--gray-soft); border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px; }
+  .bar-inner { height: 100%; background: var(--good); }
+  .bar-inner.warn { background: var(--warn); }
+  .bar-inner.bad { background: var(--bad); }
+  .cat-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .cat-row:last-child { border-bottom: none; }
+  .cat-row .top { display: flex; justify-content: space-between; font-size: 13px; }
+  .cat-row .top .name { font-weight: 700; }
+  .cat-row .top .amt { color: var(--muted); }
+  .loading { text-align: center; color: var(--muted); padding: 30px 0; font-size: 13px; }
+  .recent-row td { font-size: 12px; }
+  /* スマホの狭い画面で日付・支払者などの短い項目が1文字ずつ縦に折り返さないようにする。
+     メモとカテゴリだけは折り返してよい。それでも入りきらない場合は表を横スクロール */
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-scroll th, .recent-row td { white-space: nowrap; }
+  .recent-row td.wrap { white-space: normal; min-width: 5em; }
+  .icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 5px;
+    color: var(--muted);
+  }
+  .icon-btn.danger:active { color: var(--bad); }
+  .icon-btn.edit:active { color: var(--blue); }
+  .op-cell { white-space: nowrap; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .card-head h2 { margin: 0; }
+  #refreshBtn {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--blue);
+    background: var(--blue-soft);
+    border: none;
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  #refreshBtn:disabled { opacity: 0.5; }
+  .login-box { text-align: center; padding: 24px 8px; }
+  .login-box p { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 18px; }
+  .footer-link { text-align: center; margin-top: 8px; }
+  .footer-link button { background: none; border: none; color: var(--muted); font-size: 12px; text-decoration: underline; cursor: pointer; }
+</style>
+</head>
+<body>
+<header><h1>家計簿クイック入力</h1></header>
+<main id="app">
+  <div class="loading" id="loading">読み込み中...</div>
+</main>
+
+<script>
+/* ============================================================
+   Googleログインとドライブの読み書き
+   ------------------------------------------------------------
+   家計データはGitHubには置かず、各自のGoogleドライブ上の
+   「入力アプリ_ログ.json」「入力アプリ_config.json」を、ログインした
+   本人の権限で直接読み書きする(ファイルはファイル名で探す)。
+   ログインはリダイレクト方式(iPhoneのホーム画面から開いたアプリでは
+   ポップアップ方式のログインが動かないことがあるため)。
+   ============================================================ */
+var CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
+var SCOPE = 'https://www.googleapis.com/auth/drive';
+var LOG_FILE_NAME = '入力アプリ_ログ.json';
+var CONFIG_FILE_NAME = '入力アプリ_config.json';
+var REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
+
+var TOKEN_KEY = 'kakeiToken';
+var STATE_KEY = 'kakeiAuthState';
+var SIGNED_IN_KEY = 'kakeiSignedInBefore';
+var FILE_IDS_KEY = 'kakeiFileIds';
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* 保存できない環境では無視 */ }
+}
+function storageRemove(key) {
+  try { localStorage.removeItem(key); } catch (e) { /* 同上 */ }
+}
+
+function startLogin() {
+  var state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  storageSet(STATE_KEY, state);
+  var params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    response_type: 'token',
+    scope: SCOPE,
+    include_granted_scopes: 'true',
+    state: state
+  });
+  location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
+}
+
+// Googleから戻ってきたときのURL(#access_token=...)からトークンを取り出して保存する
+function takeTokenFromUrl() {
+  if (!location.hash || location.hash.length < 2) return null;
+  var p = new URLSearchParams(location.hash.slice(1));
+  history.replaceState(null, '', REDIRECT_URI);
+  if (p.get('error')) {
+    return { error: p.get('error') };
+  }
+  var token = p.get('access_token');
+  if (!token) return null;
+  if (p.get('state') !== storageGet(STATE_KEY)) {
+    return { error: 'state_mismatch' };
+  }
+  storageRemove(STATE_KEY);
+  var expiresIn = Number(p.get('expires_in') || 3600);
+  // 期限ぎりぎりで失敗しないよう、1分早めに期限切れ扱いにする
+  storageSet(TOKEN_KEY, JSON.stringify({ token: token, expiresAt: Date.now() + (expiresIn - 60) * 1000 }));
+  storageSet(SIGNED_IN_KEY, '1');
+  return { ok: true };
+}
+
+function getValidToken() {
+  var raw = storageGet(TOKEN_KEY);
+  if (!raw) return null;
+  try {
+    var t = JSON.parse(raw);
+    return t.expiresAt > Date.now() ? t.token : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function logout() {
+  storageRemove(TOKEN_KEY);
+  storageRemove(SIGNED_IN_KEY);
+  storageRemove(FILE_IDS_KEY);
+  showLogin('ログアウトしました。');
+}
+
+function showLogin(message) {
+  document.getElementById('app').innerHTML =
+    '<div class="card login-box">' +
+      '<p>' + escapeHtml(message || '') + (message ? '<br>' : '') +
+      'Googleドライブの家計データを読み書きするため、<br>Googleアカウントでログインしてください。</p>' +
+      '<button type="button" class="btn" id="loginBtn">Googleでログイン</button>' +
+    '</div>';
+  document.getElementById('loginBtn').addEventListener('click', startLogin);
+}
+
+async function driveFetch(url, options) {
+  var token = getValidToken();
+  if (!token) {
+    startLogin();
+    throw new Error('ログインしています...');
+  }
+  options = options || {};
+  options.headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
+  options.cache = 'no-store';
+  var res = await fetch(url, options);
+  if (res.status === 401) {
+    storageRemove(TOKEN_KEY);
+    startLogin();
+    throw new Error('ログインの有効期限が切れたため、再ログインしています...');
+  }
+  return res;
+}
+
+function loadFileIds() {
+  try { return JSON.parse(storageGet(FILE_IDS_KEY) || '{}'); } catch (e) { return {}; }
+}
+
+async function findFileId(name, forceSearch) {
+  var ids = loadFileIds();
+  if (ids[name] && !forceSearch) return ids[name];
+  var q = "name = '" + name.replace(/'/g, "\\'") + "' and trashed = false";
+  var url = 'https://www.googleapis.com/drive/v3/files?pageSize=10&orderBy=modifiedTime desc' +
+    '&fields=' + encodeURIComponent('files(id,name,modifiedTime)') + '&q=' + encodeURIComponent(q);
+  var res = await driveFetch(url);
+  if (!res.ok) throw new Error('Googleドライブでファイルを探せませんでした(' + res.status + ')');
+  var data = await res.json();
+  if (!data.files || data.files.length === 0) {
+    throw new Error('Googleドライブに「' + name + '」が見つかりません。このGoogleアカウントにファイルが共有されているか確認してください。');
+  }
+  // 同名ファイルが複数ある場合は最も新しく更新されたものを使う
+  ids[name] = data.files[0].id;
+  storageSet(FILE_IDS_KEY, JSON.stringify(ids));
+  return ids[name];
+}
+
+async function readJson(name) {
+  var id = await findFileId(name);
+  var res = await driveFetch('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media');
+  if (res.status === 404) {
+    // 覚えていたファイルが削除・作り直しされた場合は探し直す
+    id = await findFileId(name, true);
+    res = await driveFetch('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media');
+  }
+  if (!res.ok) throw new Error('「' + name + '」を読み込めませんでした(' + res.status + ')');
+  return res.json();
+}
+
+async function writeJson(name, obj) {
+  var id = await findFileId(name);
+  var res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + id + '?uploadType=media', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify(obj, null, 2)
+  });
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('「' + name + '」を書き換える権限がありません。ファイルの共有設定が「編集者」になっているか確認してください。');
+    }
+    throw new Error('「' + name + '」に保存できませんでした(' + res.status + ')');
+  }
+}
+
+/* ---------- データ操作(旧Apps Script版のCode.gsと同じ処理) ---------- */
+
+function validateEntry(entry) {
+  if (!entry || !entry.date || !entry.payer || !entry.category || !entry.paymentMethod) {
+    throw new Error('必須項目が入力されていません');
+  }
+  var amount = Number(entry.amount);
+  if (!isFinite(amount) || amount <= 0) {
+    throw new Error('金額を正しく入力してください');
+  }
+  return amount;
+}
+
+async function getInitialData() {
+  var results = await Promise.all([readJson(CONFIG_FILE_NAME), readJson(LOG_FILE_NAME)]);
+  return { config: results[0], log: results[1] };
+}
+
+// 書き込みの直前に最新のログを読み直してから追加・更新する(2人がほぼ同時に
+// 保存した場合に片方が消えるのを減らすため。Apps Script版のような排他ロックは無い)
+async function submitEntry(entry) {
+  var amount = validateEntry(entry);
+  var log = await readJson(LOG_FILE_NAME);
+  log.push({
+    id: crypto.randomUUID(),
+    date: entry.date,
+    payer: entry.payer,
+    category: entry.category,
+    amount: amount,
+    memo: entry.memo || '',
+    paymentMethod: entry.paymentMethod,
+    createdAt: new Date().toISOString()
+  });
+  await writeJson(LOG_FILE_NAME, log);
+  return { config: STATE.config, log: log };
+}
+
+async function updateEntry(id, entry) {
+  var amount = validateEntry(entry);
+  var log = await readJson(LOG_FILE_NAME);
+  var idx = log.findIndex(function(e) { return e.id === id; });
+  if (idx === -1) throw new Error('対象の記録が見つかりません(既に削除された可能性があります)');
+  log[idx] = {
+    id: id,
+    date: entry.date,
+    payer: entry.payer,
+    category: entry.category,
+    amount: amount,
+    memo: entry.memo || '',
+    paymentMethod: entry.paymentMethod,
+    createdAt: log[idx].createdAt,
+    updatedAt: new Date().toISOString()
+  };
+  await writeJson(LOG_FILE_NAME, log);
+  return { config: STATE.config, log: log };
+}
+
+async function deleteEntry(id) {
+  var log = await readJson(LOG_FILE_NAME);
+  var next = log.filter(function(e) { return e.id !== id; });
+  if (next.length === log.length) throw new Error('対象の記録が見つかりません(既に削除された可能性があります)');
+  await writeJson(LOG_FILE_NAME, next);
+  return { config: STATE.config, log: next };
+}
+
+/* ============================================================
+   画面(旧Apps Script版 v7 の Index.html と同じ内容)
+   ============================================================ */
+var STATE = { config: null, log: null };
+var EDITING_ID = null;
+// toISOString()はUTC基準で、日本時間の月初0〜9時に前月扱いになるため端末のローカル日付で求める
+function localMonthKey(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+var SELECTED_MONTH = localMonthKey(new Date());
+
+function fmtYen(n) {
+  return (n < 0 ? '-' : '') + '¥' + Math.abs(Math.round(n)).toLocaleString('ja-JP');
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function ymd(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function addDays(d, n) {
+  var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+// 週予算(config.categories の weeklyBudget)。週は月曜〜日曜の7日間で、月をまたいでも
+// 1週分の予算とする。週は「月曜日が属する月」の週として数え(例: 9/28〜10/4は9月第4週)。
+// 繰越額(同じ月の前の週までの残り/超過の合計、月が変わるとリセット)は参考表示のみで、
+// 使いすぎ防止のため今週の予算には加算しない
+function weeklyStatus(c, log, today) {
+  function spentBetween(start, end) {
+    var s = ymd(start), e2 = ymd(end), sum = 0;
+    log.forEach(function(e) {
+      if (e.category === c.name && e.date && e.date >= s && e.date <= e2) sum += Number(e.amount);
+    });
+    return sum;
+  }
+  var monday = addDays(today, -((today.getDay() + 6) % 7));
+  var sunday = addDays(monday, 6);
+  var ownerMonth = monday.getMonth();
+  var carryover = 0, weekNo = 1;
+  for (var m = addDays(monday, -7); m.getMonth() === ownerMonth; m = addDays(m, -7)) {
+    carryover += c.weeklyBudget - spentBetween(m, addDays(m, 6));
+    weekNo++;
+  }
+  return {
+    label: (ownerMonth + 1) + '月第' + weekNo + '週',
+    range: (monday.getMonth() + 1) + '/' + monday.getDate() + '〜' + (sunday.getMonth() + 1) + '/' + sunday.getDate(),
+    carryover: carryover,
+    spent: spentBetween(monday, sunday)
+  };
+}
+
+function monthUsageByCategory(log) {
+  var map = {};
+  log.forEach(function(e) {
+    if (!e.date || e.date.slice(0, 7) !== SELECTED_MONTH) return;
+    map[e.category] = (map[e.category] || 0) + Number(e.amount);
+  });
+  return map;
+}
+
+function optionHtml(value, selected, label) {
+  return '<option value="' + escapeHtml(value) + '"' + (selected ? ' selected' : '') + '>' + escapeHtml(label == null ? value : label) + '</option>';
+}
+
+function render() {
+  var config = STATE.config;
+  var log = STATE.log;
+  var usage = monthUsageByCategory(log);
+
+  var totalBudget = 0, totalUsed = 0;
+  config.categories.forEach(function(c) {
+    totalBudget += c.budget;
+    totalUsed += (usage[c.name] || 0);
+  });
+  var remaining = totalBudget - totalUsed;
+
+  var editingEntry = EDITING_ID ? log.find(function(e) { return e.id === EDITING_ID; }) : null;
+  if (EDITING_ID && !editingEntry) EDITING_ID = null;
+
+  var savedPayer = storageGet('lastPayer') || config.payers[0];
+  var savedMethod = storageGet('lastMethod') || config.paymentMethods[0];
+  var today = new Date();
+  var todayStr = ymd(today);
+
+  var defaultDate = editingEntry ? editingEntry.date : todayStr;
+  var defaultPayer = editingEntry ? editingEntry.payer : savedPayer;
+  var defaultMethod = editingEntry ? editingEntry.paymentMethod : savedMethod;
+  var defaultCategory = editingEntry ? editingEntry.category : null;
+  var defaultAmount = editingEntry ? editingEntry.amount : '';
+  var defaultMemo = editingEntry ? (editingEntry.memo || '') : '';
+
+  var payerOptions = config.payers.map(function(p) { return optionHtml(p, p === defaultPayer); }).join('');
+  var methodOptions = config.paymentMethods.map(function(m) { return optionHtml(m, m === defaultMethod); }).join('');
+
+  // カテゴリ選択肢は「予算表示対象(config.categories)」ではなく「全カテゴリ(config.allCategories)」
+  // を使う。予算が確定していないカテゴリでも現金払いが発生することがあり、その記録漏れを防ぐため。
+  // 予算のKPI・カテゴリ別バーは引き続きconfig.categoriesだけを対象にする(下記catRows参照)。
+  var selectableCategories = config.allCategories || config.categories;
+  var byParent = {};
+  selectableCategories.forEach(function(c) {
+    if (!byParent[c.parent]) byParent[c.parent] = [];
+    byParent[c.parent].push(c);
+  });
+  var categoryOptions = Object.keys(byParent).map(function(parent) {
+    var opts = byParent[parent].map(function(c) { return optionHtml(c.name, c.name === defaultCategory); }).join('');
+    return '<optgroup label="' + escapeHtml(parent) + '">' + opts + '</optgroup>';
+  }).join('');
+  // 編集対象のカテゴリが現在の選択肢に無い場合(config側で後から絞り込まれた等)、
+  // 気づかず別カテゴリに変わってしまわないよう、その場限りの選択肢として先頭に足す
+  var hasDefaultCategory = selectableCategories.some(function(c) { return c.name === defaultCategory; });
+  if (defaultCategory && !hasDefaultCategory) {
+    categoryOptions = optionHtml(defaultCategory, true, defaultCategory + '(現在の選択肢にありません)') + categoryOptions;
+  }
+
+  var isCurrentMonth = SELECTED_MONTH === localMonthKey(today);
+  var catRows = config.categories.filter(function(c) { return c.budget > 0; }).map(function(c) {
+    var used = usage[c.name] || 0;
+    var pct = Math.min(100, Math.round((used / c.budget) * 100));
+    var barClass = pct >= 100 ? 'bad' : (pct >= 80 ? 'warn' : '');
+    // 週予算を持つカテゴリは、今月表示中のときだけ行の下に今週分を添える。
+    // 予算はあくまで週予算そのもの(繰越は加算せず括弧書きで参考表示)
+    var weekHtml = '';
+    if (c.weeklyBudget > 0 && isCurrentMonth) {
+      var w = weeklyStatus(c, log, today);
+      var wPct = Math.min(100, Math.round((w.spent / c.weeklyBudget) * 100));
+      var wBarClass = wPct >= 100 ? 'bad' : (wPct >= 80 ? 'warn' : '');
+      var wRem = c.weeklyBudget - w.spent;
+      weekHtml = '<div style="margin:8px 0 0 12px; padding-left:10px; border-left:3px solid var(--blue-soft);">' +
+        '<div class="top" style="font-size:12px;"><span style="color:var(--muted); font-weight:700;">今週 ' + w.label + '(' + w.range + ')</span><span class="amt">' + fmtYen(w.spent) + ' / ' + fmtYen(c.weeklyBudget) + '</span></div>' +
+        '<div class="bar-outer"><div class="bar-inner ' + wBarClass + '" style="width:' + wPct + '%"></div></div>' +
+        '<div style="font-size:11px; margin-top:4px; color:var(--muted);">のこり <span style="font-weight:700; color:' + (wRem < 0 ? 'var(--bad)' : 'var(--good)') + ';">' + fmtYen(wRem) + '</span>' +
+        '(繰越 ' + (w.carryover > 0 ? '+' : '') + fmtYen(w.carryover) + ')</div>' +
+      '</div>';
+    }
+    return '<div class="cat-row">' +
+      '<div class="top"><span class="name">' + escapeHtml(c.name) + '</span><span class="amt">' + fmtYen(used) + ' / ' + fmtYen(c.budget) + '</span></div>' +
+      '<div class="bar-outer"><div class="bar-inner ' + barClass + '" style="width:' + pct + '%"></div></div>' +
+      weekHtml +
+      '</div>';
+  }).join('');
+
+  // 予算表示対象(config.categories)に含まれないカテゴリでの今月の支出を別枠で表示する
+  var budgetCategoryNames = {};
+  config.categories.forEach(function(c) { budgetCategoryNames[c.name] = true; });
+  var otherRows = Object.keys(usage).filter(function(name) {
+    return !budgetCategoryNames[name] && usage[name] > 0;
+  }).sort(function(a, b) { return usage[b] - usage[a]; }).map(function(name) {
+    return '<div class="cat-row"><div class="top"><span class="name">' + escapeHtml(name) + '</span><span class="amt">' + fmtYen(usage[name]) + '</span></div></div>';
+  }).join('');
+
+  // 選択月に入力された内容を全件表示する(件数制限なし)。日付の新しい順、
+  // 同じ日付の場合は入力(記録)した順が新しいものを上にする
+  var monthEntries = log.filter(function(e) { return e.date && e.date.slice(0, 7) === SELECTED_MONTH; })
+    .slice()
+    .sort(function(a, b) {
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      return (a.createdAt || '') < (b.createdAt || '') ? 1 : -1;
+    });
+  var recent = monthEntries.map(function(e) {
+    return '<tr class="recent-row"><td>' + escapeHtml(e.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
+      '<td class="op-cell"><button type="button" class="icon-btn edit" data-edit="' + escapeHtml(e.id) + '">✎</button><button type="button" class="icon-btn danger" data-del="' + escapeHtml(e.id) + '">✕</button></td></tr>';
+  }).join('');
+
+  // 月選択セレクト: ログに存在する月 + 常に今月を候補にする
+  var monthsSet = {};
+  log.forEach(function(e) { if (e.date) monthsSet[e.date.slice(0, 7)] = true; });
+  monthsSet[localMonthKey(today)] = true;
+  var monthOptions = Object.keys(monthsSet).sort().reverse().map(function(m) { return optionHtml(m, m === SELECTED_MONTH); }).join('');
+
+  document.getElementById('app').innerHTML =
+    '<div class="card">' +
+      '<div class="card-head"><h2>予算状況</h2>' +
+        '<div style="display:flex; gap:6px; align-items:center;">' +
+          '<select id="monthSelect" style="width:auto; padding:5px 8px; font-size:14px;">' + monthOptions + '</select>' +
+          '<button type="button" id="refreshBtn">⟳ 更新</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="kpi-row">' +
+        '<div class="kpi"><div class="label">予算</div><div class="value">' + fmtYen(totalBudget) + '</div></div>' +
+        '<div class="kpi"><div class="label">使用</div><div class="value">' + fmtYen(totalUsed) + '</div></div>' +
+        '<div class="kpi"><div class="label">のこり</div><div class="value ' + (remaining < 0 ? 'bad' : 'good') + '">' + fmtYen(remaining) + '</div></div>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+      '<h2>' + (editingEntry ? '記録の編集' : '入力') + '</h2>' +
+      (editingEntry ? '<div class="edit-banner"><span>この記録を編集中です</span><button type="button" id="cancelEditBtn">キャンセル</button></div>' : '') +
+      '<form id="entryForm">' +
+        '<div class="row2">' +
+          '<div class="field"><label>日付</label><input type="date" id="f_date" value="' + escapeHtml(defaultDate) + '"></div>' +
+          '<div class="field"><label>支払者</label><select id="f_payer">' + payerOptions + '</select></div>' +
+        '</div>' +
+        '<div class="field"><label>カテゴリ</label><select id="f_category">' + categoryOptions + '</select></div>' +
+        '<div class="row2">' +
+          '<div class="field"><label>金額</label><input type="number" id="f_amount" inputmode="numeric" placeholder="0" value="' + escapeHtml(defaultAmount) + '"></div>' +
+          '<div class="field"><label>支払い方法</label><select id="f_method">' + methodOptions + '</select></div>' +
+        '</div>' +
+        '<div class="field"><label>メモ(任意)</label><input type="text" id="f_memo" placeholder="" value="' + escapeHtml(defaultMemo) + '"></div>' +
+        '<button type="submit" class="btn" id="submitBtn">' + (editingEntry ? '更新' : '確定') + '</button>' +
+        (editingEntry ? '<button type="button" class="btn ghost" id="cancelEditBtn2">キャンセルして新規入力に戻る</button>' : '') +
+        '<div class="msg" id="msg"></div>' +
+      '</form>' +
+    '</div>' +
+
+    '<div class="card">' +
+      '<h2>カテゴリ別 予算消化(' + SELECTED_MONTH + ')</h2>' +
+      (catRows || '<div style="font-size:13px;color:var(--muted)">表示できるカテゴリがありません</div>') +
+    '</div>' +
+
+    '<div class="card">' +
+      '<h2>予算対象外のカテゴリ(' + SELECTED_MONTH + ')</h2>' +
+      (otherRows || '<div style="font-size:13px;color:var(--muted)">この月はまだありません</div>') +
+    '</div>' +
+
+    '<div class="card">' +
+      '<h2>入力一覧(' + SELECTED_MONTH + ')</h2>' +
+      '<div class="table-scroll"><table><thead><tr><th>日付</th><th>支払者</th><th>カテゴリ</th><th>金額</th><th>方法</th><th>メモ</th><th></th></tr></thead>' +
+      '<tbody>' + (recent || '<tr><td colspan="7" style="color:var(--muted)">この月の入力はまだありません</td></tr>') + '</tbody></table></div>' +
+    '</div>' +
+
+    '<div class="footer-link"><button type="button" id="logoutBtn">ログアウト</button></div>';
+
+  document.getElementById('entryForm').addEventListener('submit', onSubmit);
+  document.querySelectorAll('[data-edit]').forEach(function(btn) {
+    btn.addEventListener('click', function() { startEdit(btn.dataset.edit); });
+  });
+  document.querySelectorAll('[data-del]').forEach(function(btn) {
+    btn.addEventListener('click', function() { onDelete(btn.dataset.del); });
+  });
+  var cancelBtn = document.getElementById('cancelEditBtn');
+  if (cancelBtn) cancelBtn.addEventListener('click', cancelEdit);
+  var cancelBtn2 = document.getElementById('cancelEditBtn2');
+  if (cancelBtn2) cancelBtn2.addEventListener('click', cancelEdit);
+  document.getElementById('refreshBtn').addEventListener('click', refreshData);
+  document.getElementById('monthSelect').addEventListener('change', function() {
+    SELECTED_MONTH = this.value;
+    render();
+  });
+  document.getElementById('logoutBtn').addEventListener('click', function() {
+    if (confirm('ログアウトしますか?')) logout();
+  });
+}
+
+async function refreshData() {
+  var btn = document.getElementById('refreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '更新中...'; }
+  try {
+    var data = await getInitialData();
+    STATE.config = data.config;
+    STATE.log = data.log;
+    render();
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = '⟳ 更新'; }
+    alert(err.message || String(err));
+  }
+}
+
+function startEdit(id) {
+  EDITING_ID = id;
+  render();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function cancelEdit() {
+  EDITING_ID = null;
+  render();
+}
+
+async function onDelete(id) {
+  if (!confirm('この記録を削除しますか?')) return;
+  try {
+    var result = await deleteEntry(id);
+    STATE.log = result.log;
+    if (EDITING_ID === id) EDITING_ID = null;
+    render();
+    var m = document.getElementById('msg');
+    if (m) { m.className = 'msg ok'; m.textContent = '削除しました'; }
+  } catch (err) {
+    alert(err.message || String(err));
+  }
+}
+
+async function onSubmit(ev) {
+  ev.preventDefault();
+  var btn = document.getElementById('submitBtn');
+  var msg = document.getElementById('msg');
+  msg.className = 'msg';
+  msg.textContent = '';
+
+  var entry = {
+    date: document.getElementById('f_date').value,
+    payer: document.getElementById('f_payer').value,
+    category: document.getElementById('f_category').value,
+    amount: document.getElementById('f_amount').value,
+    paymentMethod: document.getElementById('f_method').value,
+    memo: document.getElementById('f_memo').value
+  };
+
+  btn.disabled = true;
+  btn.textContent = '送信中...';
+
+  storageSet('lastPayer', entry.payer);
+  storageSet('lastMethod', entry.paymentMethod);
+
+  var wasEditing = !!EDITING_ID;
+  try {
+    var result = wasEditing ? await updateEntry(EDITING_ID, entry) : await submitEntry(entry);
+    STATE.log = result.log;
+    EDITING_ID = null;
+    render();
+    var m = document.getElementById('msg');
+    if (m) { m.className = 'msg ok'; m.textContent = wasEditing ? '更新しました' : '記録しました'; }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = wasEditing ? '更新' : '確定';
+    msg.className = 'msg err';
+    msg.textContent = err.message || String(err);
+  }
+}
+
+/* ---------- 起動 ---------- */
+async function boot() {
+  if (CLIENT_ID.indexOf('YOUR_CLIENT_ID') === 0) {
+    document.getElementById('app').innerHTML = '<div class="card login-box"><p>ログイン設定(クライアントID)がまだ入っていません。</p></div>';
+    return;
+  }
+  var fromUrl = takeTokenFromUrl();
+  if (fromUrl && fromUrl.error) {
+    showLogin(fromUrl.error === 'access_denied'
+      ? 'ログインがキャンセルされました。'
+      : 'ログインに失敗しました(' + fromUrl.error + ')。');
+    return;
+  }
+  if (!getValidToken()) {
+    // 一度ログインしたことがある端末では、ボタンを押さずに自動でログインし直す
+    if (storageGet(SIGNED_IN_KEY)) {
+      startLogin();
+    } else {
+      showLogin('');
+    }
+    return;
+  }
+  try {
+    var data = await getInitialData();
+    STATE.config = data.config;
+    STATE.log = data.log;
+    render();
+  } catch (err) {
+    document.getElementById('app').innerHTML =
+      '<div class="card login-box"><p>' + escapeHtml(err.message || String(err)) + '</p>' +
+      '<button type="button" class="btn" id="retryBtn">再読み込み</button>' +
+      '<div class="footer-link"><button type="button" id="logoutBtn">ログアウト</button></div></div>';
+    document.getElementById('retryBtn').addEventListener('click', function() { location.reload(); });
+    document.getElementById('logoutBtn').addEventListener('click', logout);
+  }
+}
+
+boot();
+</script>
+</body>
+</html>
