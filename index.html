@@ -186,6 +186,9 @@ var TOKEN_KEY = 'kakeiToken';
 var STATE_KEY = 'kakeiAuthState';
 var SIGNED_IN_KEY = 'kakeiSignedInBefore';
 var FILE_IDS_KEY = 'kakeiFileIds';
+// 前回ログインしたGoogleアカウントのメールアドレス。再ログイン時にlogin_hintとして渡し、
+// 「アカウントを選択」画面でタップしなくても自動で同じアカウントが選ばれるようにする
+var LOGIN_HINT_KEY = 'kakeiLoginHint';
 
 function storageGet(key) {
   try { return localStorage.getItem(key); } catch (e) { return null; }
@@ -208,6 +211,8 @@ function startLogin() {
     include_granted_scopes: 'true',
     state: state
   });
+  var hint = storageGet(LOGIN_HINT_KEY);
+  if (hint) params.set('login_hint', hint);
   location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
 }
 
@@ -247,6 +252,7 @@ function logout() {
   storageRemove(TOKEN_KEY);
   storageRemove(SIGNED_IN_KEY);
   storageRemove(FILE_IDS_KEY);
+  storageRemove(LOGIN_HINT_KEY);
   showLogin('ログアウトしました。');
 }
 
@@ -276,6 +282,17 @@ async function driveFetch(url, options) {
     throw new Error('ログインの有効期限が切れたため、再ログインしています...');
   }
   return res;
+}
+
+// ログイン中のアカウントのメールアドレスを覚えておく(失敗しても動作には影響しない)
+async function rememberLoginHint() {
+  if (storageGet(LOGIN_HINT_KEY)) return;
+  try {
+    var res = await driveFetch('https://www.googleapis.com/drive/v3/about?fields=' + encodeURIComponent('user(emailAddress)'));
+    if (!res.ok) return;
+    var data = await res.json();
+    if (data.user && data.user.emailAddress) storageSet(LOGIN_HINT_KEY, data.user.emailAddress);
+  } catch (e) { /* 無視 */ }
 }
 
 function loadFileIds() {
@@ -749,6 +766,7 @@ async function boot() {
     STATE.config = data.config;
     STATE.log = data.log;
     render();
+    rememberLoginHint();
   } catch (err) {
     document.getElementById('app').innerHTML =
       '<div class="card login-box"><p>' + escapeHtml(err.message || String(err)) + '</p>' +
