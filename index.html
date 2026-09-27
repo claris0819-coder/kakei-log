@@ -143,7 +143,7 @@
   .op-cell { white-space: nowrap; }
   .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .card-head h2 { margin: 0; }
-  #refreshBtn {
+  #refreshBtn, #dashRefreshBtn {
     font-size: 12px;
     font-weight: 700;
     color: var(--blue);
@@ -153,15 +153,48 @@
     padding: 5px 10px;
     cursor: pointer;
   }
-  #refreshBtn:disabled { opacity: 0.5; }
+  #refreshBtn:disabled, #dashRefreshBtn:disabled { opacity: 0.5; }
   .login-box { text-align: center; padding: 24px 8px; }
   .login-box p { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 18px; }
   .footer-link { text-align: center; margin-top: 8px; }
   .footer-link button { background: none; border: none; color: var(--muted); font-size: 12px; text-decoration: underline; cursor: pointer; }
+  /* 入力/ダッシュボードの切り替え */
+  .tabs { display: flex; background: var(--white); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+  .tabs[hidden] { display: none; }
+  .tabs button {
+    flex: 1; background: none; border: none; padding: 12px 0; font-size: 14px; font-weight: 700;
+    color: var(--muted); border-bottom: 3px solid transparent; cursor: pointer; font-family: inherit;
+  }
+  .tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
+  /* ダッシュボード(PCの資産管理アプリのダッシュボードを見るだけ) */
+  .kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kpi-tile { background: var(--blue-soft); border-radius: 8px; padding: 10px; }
+  .kpi-tile .label { font-size: 11px; color: var(--muted); }
+  .kpi-tile .value { font-size: 17px; font-weight: 700; margin-top: 2px; }
+  .kpi-tile .value.good { color: var(--good); }
+  .kpi-tile .value.bad { color: var(--bad); }
+  .saved-at { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .dash-row { padding: 8px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .dash-row.child { padding-left: 14px; }
+  .dash-row.child .name { font-weight: 400; }
+  .dash-row .top { display: flex; justify-content: space-between; font-size: 13px; gap: 8px; }
+  .dash-row .top .name { font-weight: 700; }
+  .dash-row .top .amt { color: var(--muted); white-space: nowrap; }
+  .dash-row .sub { font-size: 11px; color: var(--muted); margin-top: 3px; text-align: right; }
+  .dash-row .caret { color: var(--muted); font-size: 10px; margin-left: 4px; }
+  .bar-inner.none { background: var(--muted); }
+  .dash-detail { padding: 4px 0 8px 14px; }
+  .dash-detail table td { font-size: 12px; vertical-align: top; }
+  .dash-detail .memo { color: var(--muted); font-size: 11px; }
+  .empty-note { font-size: 13px; color: var(--muted); padding: 6px 0; }
 </style>
 </head>
 <body>
 <header><h1>家計簿クイック入力</h1></header>
+<nav class="tabs" id="tabs" hidden>
+  <button type="button" data-view="input" class="active">入力</button>
+  <button type="button" data-view="dash">ダッシュボード</button>
+</nav>
 <main id="app">
   <div class="loading" id="loading">読み込み中...</div>
 </main>
@@ -257,6 +290,7 @@ function logout() {
 }
 
 function showLogin(message) {
+  document.getElementById('tabs').hidden = true;
   document.getElementById('app').innerHTML =
     '<div class="card login-box">' +
       '<p>' + escapeHtml(message || '') + (message ? '<br>' : '') +
@@ -739,6 +773,339 @@ async function onSubmit(ev) {
   }
 }
 
+/* ============================================================
+   ダッシュボード(見るだけ)
+   ------------------------------------------------------------
+   PCの資産管理アプリが自動保存している「資産データ.json」を読み取り専用で
+   表示する。書き込みは一切しない(PCアプリの自動保存と衝突させないため)。
+   集計ルールはPCアプリの renderDashboardBody などと同じにしてある:
+   振替は常に除外、計算対象を外した取引(t.excluded)も除外、純資産は
+   銀行・証券の残高(その月以前で最後に記録された残高)− カードのその月の利用額
+   ============================================================ */
+var ASSET_FILE_NAME = '資産データ.json';
+var TRANSFER_CATEGORY = '振替';
+var VIEW = 'input';
+var DASH = { asset: null, savedAt: null, month: null, expanded: {} };
+
+function switchView(view) {
+  VIEW = view;
+  document.querySelectorAll('#tabs button').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+  window.scrollTo(0, 0);
+  if (view === 'dash') showDashboard(false);
+  else render();
+}
+
+async function fileModifiedTime(name) {
+  var id = await findFileId(name);
+  var res = await driveFetch('https://www.googleapis.com/drive/v3/files/' + id + '?fields=modifiedTime');
+  if (!res.ok) return null;
+  return (await res.json()).modifiedTime || null;
+}
+
+async function showDashboard(forceReload) {
+  if (!DASH.asset || forceReload) {
+    document.getElementById('app').innerHTML = '<div class="loading">資産データを読み込み中...</div>';
+    try {
+      var results = await Promise.all([readJson(ASSET_FILE_NAME), fileModifiedTime(ASSET_FILE_NAME)]);
+      DASH.asset = results[0];
+      DASH.savedAt = results[1];
+    } catch (err) {
+      if (VIEW !== 'dash') return;
+      document.getElementById('app').innerHTML =
+        '<div class="card login-box"><p>' + escapeHtml(err.message || String(err)) +
+        '<br>(ダッシュボードは「資産データ.json」を共有されたアカウントだけが見られます)</p>' +
+        '<button type="button" class="btn" id="dashRetryBtn">再読み込み</button></div>';
+      document.getElementById('dashRetryBtn').addEventListener('click', function() { showDashboard(true); });
+      return;
+    }
+  }
+  if (VIEW === 'dash') renderDashboard();
+}
+
+function assetMonths(a) {
+  return Object.keys(a.monthlySnapshots || {}).sort();
+}
+
+function balanceAt(a, accountId, month) {
+  var months = assetMonths(a).filter(function(m) { return m <= month; });
+  for (var i = months.length - 1; i >= 0; i--) {
+    var bal = (a.monthlySnapshots[months[i]].accountBalances || {})[accountId];
+    if (bal !== undefined) return bal;
+  }
+  return 0;
+}
+
+function cardCycleTotal(a, accountId, month) {
+  var snap = a.monthlySnapshots[month];
+  if (!snap) return 0;
+  return snap.transactions
+    .filter(function(t) { return t.accountId === accountId; })
+    .reduce(function(s, t) { return s + Math.abs(t.amount); }, 0);
+}
+
+function netWorthForMonth(a, month) {
+  var assets = 0, investments = 0, liabilities = 0;
+  (a.accounts || []).forEach(function(acc) {
+    if (acc.type === 'bank') assets += balanceAt(a, acc.id, month);
+    else if (acc.type === 'investment') investments += balanceAt(a, acc.id, month);
+    else if (acc.type === 'card') liabilities += cardCycleTotal(a, acc.id, month);
+  });
+  return { liabilities: liabilities, total: assets + investments - liabilities };
+}
+
+function leafToParent(a, leaf) {
+  for (var i = 0; i < a.categories.length; i++) {
+    var cat = a.categories[i];
+    if (cat.name === leaf) return cat.name;
+    if (cat.children && cat.children.some(function(c) { return c.name === leaf; })) return cat.name;
+  }
+  return leaf;
+}
+
+function parentBudget(cat) {
+  if (cat.children && cat.children.length) {
+    return cat.children.reduce(function(s, c) { return s + (c.budget || 0); }, 0);
+  }
+  return cat.budget || 0;
+}
+
+// 引落とし予定日が指定されて取り込まれた取引だけを数える(PCアプリと同じく推測はしない)
+function cardDueForMonth(a, account, month) {
+  var list = [];
+  assetMonths(a).forEach(function(m) {
+    a.monthlySnapshots[m].transactions.forEach(function(t) {
+      if (t.accountId === account.id && t.debitDate && t.debitDate.slice(0, 7) === month) list.push(t);
+    });
+  });
+  return {
+    amount: list.reduce(function(s, t) { return s + Math.abs(t.amount); }, 0),
+    count: list.length,
+    debitDates: Array.from(new Set(list.map(function(t) { return t.debitDate; }))).sort(),
+    usageMonths: Array.from(new Set(list.map(function(t) { return t.date.slice(0, 7); }))).sort()
+  };
+}
+
+function dashTotals(a, month) {
+  var catTotals = {}, leafTotals = {}, incomeTotals = {}, totalIncome = 0;
+  var snap = a.monthlySnapshots[month];
+  (snap ? snap.transactions : []).forEach(function(t) {
+    if (t.category === TRANSFER_CATEGORY) return;
+    if (t.excluded) return;
+    if (t.amount < 0) {
+      var leaf = t.category || 'その他';
+      var parent = t.category ? leafToParent(a, t.category) : 'その他';
+      catTotals[parent] = (catTotals[parent] || 0) + Math.abs(t.amount);
+      leafTotals[leaf] = (leafTotals[leaf] || 0) + Math.abs(t.amount);
+    } else if (t.amount > 0) {
+      var inc = t.category || '未分類';
+      incomeTotals[inc] = (incomeTotals[inc] || 0) + t.amount;
+      totalIncome += t.amount;
+    }
+  });
+  var totalSpend = Object.keys(catTotals).reduce(function(s, k) { return s + catTotals[k]; }, 0);
+  return { catTotals: catTotals, leafTotals: leafTotals, incomeTotals: incomeTotals, totalIncome: totalIncome, totalSpend: totalSpend };
+}
+
+// 予算バーをタップしたときの明細(PCアプリと同じく、振替・計算対象外もそのまま表示する)
+function dashTransactionsFor(a, month, key) {
+  var snap = a.monthlySnapshots[month];
+  if (!snap) return [];
+  var isIncome = key.indexOf('income:') === 0;
+  var name = key.slice(key.indexOf(':') + 1);
+  return snap.transactions.filter(function(t) {
+    if (isIncome) return t.amount > 0 && (t.category || '未分類') === name;
+    return t.amount < 0 && (t.category || 'その他') === name;
+  }).sort(function(x, y) { return x.date < y.date ? 1 : (x.date > y.date ? -1 : 0); });
+}
+
+function dashDetailHtml(a, month, key) {
+  var txns = dashTransactionsFor(a, month, key);
+  if (txns.length === 0) return '<div class="dash-detail"><div class="empty-note">この月の取引はありません</div></div>';
+  var rows = txns.map(function(t) {
+    return '<tr><td style="white-space:nowrap;">' + escapeHtml(t.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(t.desc) +
+      (t.logMemo ? '<div class="memo">📝 ' + escapeHtml(t.logMemo) + '</div>' : '') +
+      (t.excluded ? '<div class="memo">(計算対象外)</div>' : '') +
+      '</td><td style="white-space:nowrap; text-align:right;">' + fmtYen(Math.abs(t.amount)) + '</td></tr>';
+  }).join('');
+  return '<div class="dash-detail"><table><tbody>' + rows + '</tbody></table></div>';
+}
+
+function dashBudgetRow(label, used, budget, opts) {
+  var hasBudget = budget > 0;
+  var pct = hasBudget ? Math.min(100, Math.round((used / budget) * 100)) : (used > 0 ? 100 : 0);
+  var barClass = !hasBudget ? 'none' : (used > budget ? 'bad' : '');
+  var rem = budget - used;
+  var sub = hasBudget
+    ? 'のこり <span style="font-weight:700; color:' + (rem < 0 ? 'var(--bad)' : 'var(--good)') + ';">' + fmtYen(rem) + '</span>'
+    : (used > 0 ? '予算未設定' : '');
+  return '<div class="dash-row' + (opts.child ? ' child' : '') + '"' + (opts.attrs || '') + '>' +
+    '<div class="top"><span class="name">' + escapeHtml(label) + (opts.caret ? '<span class="caret">' + opts.caret + '</span>' : '') + '</span>' +
+    '<span class="amt">' + (hasBudget ? fmtYen(used) + ' / ' + fmtYen(budget) : fmtYen(used)) + '</span></div>' +
+    '<div class="bar-outer"><div class="bar-inner ' + barClass + '" style="width:' + pct + '%"></div></div>' +
+    (sub ? '<div class="sub">' + sub + '</div>' : '') +
+    '</div>';
+}
+
+function netWorthChartSvg(a, months) {
+  if (months.length === 0) return '';
+  var w = 360, h = 170, padL = 44, padR = 12, padT = 14, padB = 24;
+  var pts = months.map(function(m) { return { m: m, v: netWorthForMonth(a, m).total }; });
+  var maxV = Math.max.apply(null, pts.map(function(p) { return p.v; }).concat([0]));
+  var minV = Math.min.apply(null, pts.map(function(p) { return p.v; }).concat([0]));
+  if (maxV === minV) maxV += 1;
+  var xStep = pts.length > 1 ? (w - padL - padR) / (pts.length - 1) : 0;
+  function x(i) { return padL + i * xStep; }
+  function y(v) { return padT + (h - padT - padB) * (1 - (v - minV) / (maxV - minV)); }
+  function short(n) { n = Math.round(n); return Math.abs(n) >= 10000 ? (n / 10000).toFixed(0) + '万' : String(n); }
+  var path = pts.map(function(p, i) { return (i ? 'L' : 'M') + x(i) + ',' + y(p.v); }).join(' ');
+  var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%; height:auto; display:block;">' +
+    '<line x1="' + padL + '" y1="' + y(0) + '" x2="' + (w - padR) + '" y2="' + y(0) + '" stroke="#DFE2EA" stroke-width="1"/>' +
+    '<path d="' + path + '" fill="none" stroke="#3457D5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+  var labelEvery = Math.ceil(pts.length / 6);
+  pts.forEach(function(p, i) {
+    svg += '<circle cx="' + x(i) + '" cy="' + y(p.v) + '" r="3" fill="#3457D5"/>';
+    if (i % labelEvery === 0 || i === pts.length - 1) {
+      svg += '<text x="' + x(i) + '" y="' + (h - 6) + '" font-size="10" fill="#8A90A3" text-anchor="middle">' + p.m.slice(2).replace('-', '/') + '</text>';
+    }
+  });
+  svg += '<text x="2" y="' + (y(maxV) + 4) + '" font-size="10" fill="#8A90A3">' + short(maxV) + '</text>' +
+    '<text x="2" y="' + (y(minV) + 4) + '" font-size="10" fill="#8A90A3">' + short(minV) + '</text></svg>';
+  return svg;
+}
+
+function formatSavedAt(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function renderDashboard() {
+  var a = DASH.asset;
+  var months = assetMonths(a);
+  if (months.length === 0) {
+    document.getElementById('app').innerHTML = '<div class="card"><div class="empty-note">資産データにまだ取引がありません</div></div>';
+    return;
+  }
+  if (!DASH.month || months.indexOf(DASH.month) === -1) {
+    var cur = localMonthKey(new Date());
+    DASH.month = months.indexOf(cur) !== -1 ? cur : months[months.length - 1];
+  }
+  var month = DASH.month;
+  var nw = netWorthForMonth(a, month);
+  var prev = months[months.indexOf(month) - 1];
+  var delta = prev ? nw.total - netWorthForMonth(a, prev).total : null;
+  var t = dashTotals(a, month);
+
+  function tile(label, value, cls) {
+    return '<div class="kpi-tile"><div class="label">' + label + '</div><div class="value ' + (cls || '') + '">' + value + '</div></div>';
+  }
+
+  // 今月の予算: 支出全体 → 大項目(子があればタップで子を一括開閉)→ 小項目(タップで明細)
+  var totalBudget = 0;
+  a.categories.forEach(function(cat) { totalBudget += parentBudget(cat); });
+  var budgetHtml = dashBudgetRow('支出全体', t.totalSpend, totalBudget, { attrs: ' style="cursor:default;"' });
+  a.categories.forEach(function(cat) {
+    var hasChildren = cat.children && cat.children.length > 0;
+    if (hasChildren) {
+      var keys = cat.children.map(function(c) { return 'leaf:' + c.name; });
+      var allOpen = keys.every(function(k) { return DASH.expanded[k]; });
+      budgetHtml += dashBudgetRow(cat.name, t.catTotals[cat.name] || 0, parentBudget(cat), {
+        caret: allOpen ? '▲' : '▼',
+        attrs: ' data-parent-keys="' + escapeHtml(keys.join('|')) + '" data-all-open="' + allOpen + '"'
+      });
+      cat.children.forEach(function(child) {
+        var key = 'leaf:' + child.name;
+        budgetHtml += dashBudgetRow(child.name, t.leafTotals[child.name] || 0, child.budget || 0, {
+          child: true, caret: DASH.expanded[key] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(key) + '"'
+        });
+        if (DASH.expanded[key]) budgetHtml += dashDetailHtml(a, month, key);
+      });
+    } else {
+      var k = 'leaf:' + cat.name;
+      budgetHtml += dashBudgetRow(cat.name, t.catTotals[cat.name] || 0, parentBudget(cat), {
+        caret: DASH.expanded[k] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(k) + '"'
+      });
+      if (DASH.expanded[k]) budgetHtml += dashDetailHtml(a, month, k);
+    }
+  });
+
+  var incomeCats = Object.keys(t.incomeTotals).sort(function(x, y) { return t.incomeTotals[y] - t.incomeTotals[x]; });
+  var incomeHtml = incomeCats.length === 0 ? '<div class="empty-note">この月の入金はありません</div>' :
+    incomeCats.map(function(c) {
+      var key = 'income:' + c;
+      var pct = Math.min(100, Math.round((t.incomeTotals[c] / t.totalIncome) * 100));
+      return '<div class="dash-row" data-key="' + escapeHtml(key) + '">' +
+        '<div class="top"><span class="name">' + escapeHtml(c) + '<span class="caret">' + (DASH.expanded[key] ? '▲' : '▼') + '</span></span><span class="amt">' + fmtYen(t.incomeTotals[c]) + '</span></div>' +
+        '<div class="bar-outer"><div class="bar-inner" style="width:' + pct + '%"></div></div></div>' +
+        (DASH.expanded[key] ? dashDetailHtml(a, month, key) : '');
+    }).join('') +
+    '<div style="text-align:right; font-size:13px; font-weight:700; padding-top:8px;">合計 ' + fmtYen(t.totalIncome) + '</div>';
+
+  var cards = (a.accounts || []).filter(function(acc) { return acc.type === 'card'; });
+  var cardHtml = cards.length === 0 ? '<div class="empty-note">カード口座が登録されていません</div>' :
+    cards.map(function(acc) {
+      var due = cardDueForMonth(a, acc, month);
+      if (!due.count) {
+        return '<div class="dash-row" style="cursor:default;"><div class="top"><span class="name">' + escapeHtml(acc.name) + '</span><span class="amt">—</span></div>' +
+          '<div class="sub" style="text-align:left;">この月に引落とし予定日を指定した取込がありません</div></div>';
+      }
+      return '<div class="dash-row" style="cursor:default;"><div class="top"><span class="name">' + escapeHtml(acc.name) + '</span><span class="amt" style="color:var(--navy); font-weight:700;">' + fmtYen(due.amount) + '</span></div>' +
+        '<div class="sub" style="text-align:left;">引落とし日 ' + escapeHtml(due.debitDates.join('・')) + ' / 利用月 ' + escapeHtml(due.usageMonths.join('・')) + ' / ' + due.count + '件</div></div>';
+    }).join('');
+
+  var monthOptions = months.slice().reverse().map(function(m) { return optionHtml(m, m === month); }).join('');
+
+  document.getElementById('app').innerHTML =
+    '<div class="card">' +
+      '<div class="card-head"><h2>ダッシュボード(見るだけ)</h2>' +
+        '<div style="display:flex; gap:6px; align-items:center;">' +
+          '<select id="dashMonthSelect" style="width:auto; padding:5px 8px; font-size:14px;">' + monthOptions + '</select>' +
+          '<button type="button" id="dashRefreshBtn">⟳ 更新</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="kpi-grid">' +
+        tile('純資産合計', fmtYen(nw.total)) +
+        tile('前月比', delta === null ? '—' : (delta >= 0 ? '+' : '') + fmtYen(delta), delta === null ? '' : (delta >= 0 ? 'good' : 'bad')) +
+        tile('今月の支出合計', fmtYen(t.totalSpend)) +
+        tile('今月の収入合計', fmtYen(t.totalIncome)) +
+        tile('カード残高(負債)', fmtYen(nw.liabilities), nw.liabilities > 0 ? 'bad' : '') +
+      '</div>' +
+      '<div class="saved-at">PCの資産管理アプリで最後に保存: ' + escapeHtml(formatSavedAt(DASH.savedAt) || '不明') + '(CSV取込・分類はPCで行います)</div>' +
+    '</div>' +
+    '<div class="card"><h2>純資産の推移</h2>' + netWorthChartSvg(a, months) + '</div>' +
+    '<div class="card"><h2>予算(' + month + ')</h2>' + budgetHtml + '</div>' +
+    '<div class="card"><h2>収入(' + month + ')</h2>' + incomeHtml + '</div>' +
+    '<div class="card"><h2>クレジットカード引落とし予定(' + month + ')</h2>' + cardHtml + '</div>';
+
+  document.getElementById('dashMonthSelect').addEventListener('change', function() {
+    DASH.month = this.value;
+    renderDashboard();
+  });
+  document.getElementById('dashRefreshBtn').addEventListener('click', function() { showDashboard(true); });
+  document.querySelectorAll('#app [data-key]').forEach(function(row) {
+    row.addEventListener('click', function() {
+      var key = row.dataset.key;
+      if (DASH.expanded[key]) delete DASH.expanded[key]; else DASH.expanded[key] = true;
+      renderDashboard();
+    });
+  });
+  document.querySelectorAll('#app [data-parent-keys]').forEach(function(row) {
+    row.addEventListener('click', function() {
+      var open = row.dataset.allOpen === 'true';
+      row.dataset.parentKeys.split('|').forEach(function(k) {
+        if (open) delete DASH.expanded[k]; else DASH.expanded[k] = true;
+      });
+      renderDashboard();
+    });
+  });
+}
+
+document.querySelectorAll('#tabs button').forEach(function(b) {
+  b.addEventListener('click', function() { switchView(b.dataset.view); });
+});
+
 /* ---------- 起動 ---------- */
 async function boot() {
   if (CLIENT_ID.indexOf('YOUR_CLIENT_ID') === 0) {
@@ -765,6 +1132,7 @@ async function boot() {
     var data = await getInitialData();
     STATE.config = data.config;
     STATE.log = data.log;
+    document.getElementById('tabs').hidden = false;
     render();
     rememberLoginHint();
   } catch (err) {
