@@ -883,7 +883,51 @@ function netWorthForMonth(a, month) {
     else if (acc.type === 'investment') investments += balanceAt(a, acc.id, month);
     else if (acc.type === 'card') liabilities += cardCycleTotal(a, acc.id, month);
   });
+  (a.purposeAccounts || []).forEach(function(pa) { assets += purposeBalanceAtMonthEnd(a, pa, month); });
   return { liabilities: liabilities, total: assets + investments - liabilities };
+}
+
+// 目的別口座(PC版と同じ計算): 基準残高 + 代表口座のCSVに出る「普通 円 (口座名)」の入出金
+// + 手で記録した目的別口座どうしの移動。基準日より後は足し、前は差し引く
+function normDesc(s) {
+  return String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+}
+function purposeFlows(a, pa) {
+  var key = normDesc('普通 円 ' + pa.name);
+  var out = [];
+  Object.keys(a.monthlySnapshots || {}).forEach(function(m) {
+    (a.monthlySnapshots[m].transactions || []).forEach(function(t) {
+      if (t.accountId === pa.parentAccountId && normDesc(t.desc) === key) out.push({ date: t.date, amount: -t.amount });
+    });
+  });
+  (pa.adjustments || []).forEach(function(x) { out.push({ date: x.date, amount: x.amount }); });
+  return out;
+}
+function purposeBalanceAtMonthEnd(a, pa, month, flows) {
+  var end = month + '-31';
+  var bal = pa.baseBalance;
+  (flows || purposeFlows(a, pa)).forEach(function(f) {
+    if (f.date > pa.baseDate && f.date <= end) bal += f.amount;
+    else if (f.date > end && f.date <= pa.baseDate) bal -= f.amount;
+  });
+  return bal;
+}
+function purposeDashHtml(a, month) {
+  var tBal = 0;
+  var rows = (a.purposeAccounts || []).map(function(pa) {
+    var flows = purposeFlows(a, pa);
+    var bal = purposeBalanceAtMonthEnd(a, pa, month, flows);
+    var inSum = 0, outSum = 0;
+    flows.forEach(function(f) {
+      if (f.date.slice(0, 7) !== month) return;
+      if (f.amount > 0) inSum += f.amount; else outSum -= f.amount;
+    });
+    tBal += bal;
+    var sub = [inSum ? '入金 ' + fmtYen(inSum) : '', outSum ? '出金 ' + fmtYen(outSum) : ''].filter(Boolean).join(' / ');
+    return '<div class="dash-row" style="cursor:default;"><div class="top"><span class="name">' + escapeHtml(pa.name) + '</span><span class="amt">' + fmtYen(bal) + '</span></div>' +
+      (sub ? '<div class="sub" style="text-align:left;">' + sub + '</div>' : '') + '</div>';
+  }).join('');
+  return rows + '<div style="text-align:right; font-size:13px; font-weight:700; padding-top:8px;">合計 ' + fmtYen(tBal) + '</div>';
 }
 
 function leafToParent(a, leaf) {
@@ -1106,6 +1150,7 @@ function renderDashboard() {
       '<div class="saved-at">PCの資産管理アプリで最後に保存: ' + escapeHtml(formatSavedAt(DASH.savedAt) || '不明') + '(CSV取込・分類はPCで行います)</div>' +
     '</div>' +
     '<div class="card"><h2>純資産の推移</h2>' + netWorthChartSvg(a, months) + '</div>' +
+    ((a.purposeAccounts || []).length ? '<div class="card"><h2>目的別口座(' + month + '末)</h2>' + purposeDashHtml(a, month) + '</div>' : '') +
     '<div class="card"><h2>予算(' + month + ')</h2>' + budgetHtml + '</div>' +
     '<div class="card"><h2>収入(' + month + ')</h2>' + incomeHtml + '</div>' +
     '<div class="card"><h2>クレジットカード引落とし予定(' + month + ')</h2>' + cardHtml + '</div>';
