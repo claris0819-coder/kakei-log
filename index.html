@@ -1047,9 +1047,42 @@ function leafToParent(a, leaf) {
 
 function parentBudget(cat) {
   if (cat.children && cat.children.length) {
-    return cat.children.reduce(function(s, c) { return s + (c.budget || 0); }, 0);
+    return cat.children.reduce(function(s, c) { return s + (isCycleCat(c) ? 0 : (c.budget || 0)); }, 0);
   }
-  return cat.budget || 0;
+  return isCycleCat(cat) ? 0 : (cat.budget || 0);
+}
+
+// 周期予算(PC版と同じ): cycleMonths か月ごとに区切った期間の合計を cycleBudget と比べる。
+// 毎月の予算(親カテゴリ・支出全体)の集計からは外す
+function isCycleCat(c) { return !!c && c.cycleMonths > 1; }
+function monthIdx(m) { return +m.slice(0, 4) * 12 + (+m.slice(5, 7)) - 1; }
+function monthFromIdx(i) { var mm = i % 12 + 1; return Math.floor(i / 12) + '-' + (mm < 10 ? '0' : '') + mm; }
+function findLeafObj(a, name) {
+  for (var i = 0; i < a.categories.length; i++) {
+    var cat = a.categories[i];
+    if (cat.children && cat.children.length) {
+      for (var j = 0; j < cat.children.length; j++) if (cat.children[j].name === name) return cat.children[j];
+    } else if (cat.name === name) return cat;
+  }
+  return null;
+}
+function dashCycleRow(a, c, month, opts) {
+  var s0 = monthIdx(c.cycleStartMonth || month);
+  var s = s0 + Math.floor((monthIdx(month) - s0) / c.cycleMonths) * c.cycleMonths;
+  var from = monthFromIdx(s), to = monthFromIdx(s + c.cycleMonths - 1);
+  var used = 0;
+  Object.keys(a.monthlySnapshots).forEach(function(m) {
+    if (m < from || m > to) return;
+    a.monthlySnapshots[m].transactions.forEach(function(t) {
+      if (t.category !== c.name || t.amount >= 0 || t.excluded) return;
+      used += Math.abs(t.amount) - (Number(t.riceAmount) || 0);
+    });
+  });
+  var range = from.slice(0, 4) === to.slice(0, 4)
+    ? (+from.slice(5, 7)) + '〜' + (+to.slice(5, 7)) + '月'
+    : from.slice(0, 4) + '/' + (+from.slice(5, 7)) + '〜' + to.slice(0, 4) + '/' + (+to.slice(5, 7)) + '月';
+  var label = c.name + '(' + c.cycleMonths + 'か月ごと・' + range + 'の合計)';
+  return dashBudgetRow(label, used, c.cycleBudget || 0, opts);
 }
 
 // 引落とし予定日が指定されて取り込まれた取引だけを数える(PCアプリと同じく推測はしない)
@@ -1069,7 +1102,7 @@ function cardDueForMonth(a, account, month) {
 }
 
 function dashTotals(a, month) {
-  var catTotals = {}, leafTotals = {}, incomeTotals = {}, totalIncome = 0, riceMonth = 0;
+  var catTotals = {}, leafTotals = {}, incomeTotals = {}, totalIncome = 0, riceMonth = 0, cycleMonth = 0;
   var snap = a.monthlySnapshots[month];
   (snap ? snap.transactions : []).forEach(function(t) {
     if (t.category === TRANSFER_CATEGORY) return;
@@ -1080,8 +1113,9 @@ function dashTotals(a, month) {
       // お米代はお米枠で別に管理するので、予算の集計からは除く(PC版と同じ)
       var rice = Number(t.riceAmount) || 0;
       riceMonth += rice;
-      catTotals[parent] = (catTotals[parent] || 0) + Math.abs(t.amount) - rice;
       leafTotals[leaf] = (leafTotals[leaf] || 0) + Math.abs(t.amount) - rice;
+      if (isCycleCat(findLeafObj(a, leaf))) { cycleMonth += Math.abs(t.amount) - rice; return; }
+      catTotals[parent] = (catTotals[parent] || 0) + Math.abs(t.amount) - rice;
     } else if (t.amount > 0) {
       var inc = t.category || '未分類';
       incomeTotals[inc] = (incomeTotals[inc] || 0) + t.amount;
@@ -1090,7 +1124,7 @@ function dashTotals(a, month) {
   });
   var budgetSpend = Object.keys(catTotals).reduce(function(s, k) { return s + catTotals[k]; }, 0);
   return { catTotals: catTotals, leafTotals: leafTotals, incomeTotals: incomeTotals, totalIncome: totalIncome,
-    budgetSpend: budgetSpend, totalSpend: budgetSpend + riceMonth };
+    budgetSpend: budgetSpend, totalSpend: budgetSpend + riceMonth + cycleMonth };
 }
 
 // お米枠(PC版と同じ): 開始月から毎月 riceBudget ずつたまり、お米代の分だけ減る
@@ -1226,17 +1260,17 @@ function renderDashboard() {
       });
       cat.children.forEach(function(child) {
         var key = 'leaf:' + child.name;
-        budgetHtml += dashBudgetRow(child.name, t.leafTotals[child.name] || 0, child.budget || 0, {
-          child: true, caret: DASH.expanded[key] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(key) + '"'
-        });
+        var rowOpts = { child: true, caret: DASH.expanded[key] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(key) + '"' };
+        budgetHtml += isCycleCat(child) ? dashCycleRow(a, child, month, rowOpts)
+          : dashBudgetRow(child.name, t.leafTotals[child.name] || 0, child.budget || 0, rowOpts);
         if (DASH.expanded[key]) budgetHtml += dashDetailHtml(a, month, key);
         budgetHtml += dashRiceRowHtml(a, child, month);
       });
     } else {
       var k = 'leaf:' + cat.name;
-      budgetHtml += dashBudgetRow(cat.name, t.catTotals[cat.name] || 0, parentBudget(cat), {
-        caret: DASH.expanded[k] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(k) + '"'
-      });
+      var catOpts = { caret: DASH.expanded[k] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(k) + '"' };
+      budgetHtml += isCycleCat(cat) ? dashCycleRow(a, cat, month, catOpts)
+        : dashBudgetRow(cat.name, t.catTotals[cat.name] || 0, parentBudget(cat), catOpts);
       if (DASH.expanded[k]) budgetHtml += dashDetailHtml(a, month, k);
     }
   });
