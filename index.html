@@ -391,6 +391,15 @@ function validateEntry(entry) {
   return amount;
 }
 
+// 「お米を含む」にチェックした場合のお米代(含まない場合は0)
+function validateRice(entry, amount) {
+  if (!entry.hasRice) return 0;
+  var rice = Number(entry.riceAmount);
+  if (!isFinite(rice) || rice <= 0) throw new Error('お米代を正しく入力してください');
+  if (rice > amount) throw new Error('お米代が金額を超えています');
+  return rice;
+}
+
 async function getInitialData() {
   var results = await Promise.all([readJson(CONFIG_FILE_NAME), readJson(LOG_FILE_NAME)]);
   return { config: results[0], log: results[1] };
@@ -400,8 +409,9 @@ async function getInitialData() {
 // 保存した場合に片方が消えるのを減らすため。Apps Script版のような排他ロックは無い)
 async function submitEntry(entry) {
   var amount = validateEntry(entry);
+  var rice = validateRice(entry, amount);
   var log = await readJson(LOG_FILE_NAME);
-  log.push({
+  var rec = {
     id: crypto.randomUUID(),
     date: entry.date,
     payer: entry.payer,
@@ -410,13 +420,16 @@ async function submitEntry(entry) {
     memo: entry.memo || '',
     paymentMethod: entry.paymentMethod,
     createdAt: new Date().toISOString()
-  });
+  };
+  if (rice) rec.riceAmount = rice;
+  log.push(rec);
   await writeJson(LOG_FILE_NAME, log);
   return { config: STATE.config, log: log };
 }
 
 async function updateEntry(id, entry) {
   var amount = validateEntry(entry);
+  var rice = validateRice(entry, amount);
   var log = await readJson(LOG_FILE_NAME);
   var idx = log.findIndex(function(e) { return e.id === id; });
   if (idx === -1) throw new Error('対象の記録が見つかりません(既に削除された可能性があります)');
@@ -431,6 +444,7 @@ async function updateEntry(id, entry) {
     createdAt: log[idx].createdAt,
     updatedAt: new Date().toISOString()
   };
+  if (rice) log[idx].riceAmount = rice;
   await writeJson(LOG_FILE_NAME, log);
   return { config: STATE.config, log: log };
 }
@@ -484,7 +498,7 @@ function weeklyStatus(c, log, today) {
   function spentBetween(start, end) {
     var s = ymd(start), e2 = ymd(end), sum = 0;
     log.forEach(function(e) {
-      if (e.category === c.name && e.date && e.date >= s && e.date <= e2) sum += Number(e.amount);
+      if (e.category === c.name && e.date && e.date >= s && e.date <= e2) sum += budgetAmount(e);
     });
     return sum;
   }
@@ -504,13 +518,32 @@ function weeklyStatus(c, log, today) {
   };
 }
 
+// 予算判定に使う金額: 「お米を含む」記録はお米代を除く(お米はお米枠で別に管理する)
+function budgetAmount(e) { return Number(e.amount) - (Number(e.riceAmount) || 0); }
+
 function monthUsageByCategory(log) {
   var map = {};
   log.forEach(function(e) {
     if (!e.date || e.date.slice(0, 7) !== SELECTED_MONTH) return;
-    map[e.category] = (map[e.category] || 0) + Number(e.amount);
+    map[e.category] = (map[e.category] || 0) + budgetAmount(e);
   });
   return map;
+}
+
+// お米枠: 開始月から毎月 riceBudget ずつたまり、お米代の分だけ減る(使わなかった分は翌月に繰り越す)
+function ricePool(c, log, month) {
+  if (!(c.riceBudget > 0) || !c.riceStartMonth || month < c.riceStartMonth) return null;
+  var y0 = +c.riceStartMonth.slice(0, 4), m0 = +c.riceStartMonth.slice(5, 7);
+  var months = (+month.slice(0, 4) - y0) * 12 + (+month.slice(5, 7) - m0) + 1;
+  var spentTotal = 0, spentMonth = 0;
+  log.forEach(function(e) {
+    if (!e.riceAmount || !e.date) return;
+    var m = e.date.slice(0, 7);
+    if (m < c.riceStartMonth || m > month) return;
+    spentTotal += Number(e.riceAmount);
+    if (m === month) spentMonth += Number(e.riceAmount);
+  });
+  return { remaining: months * c.riceBudget - spentTotal, spentMonth: spentMonth };
 }
 
 function optionHtml(value, selected, label) {
@@ -543,6 +576,9 @@ function render() {
   var defaultCategory = editingEntry ? editingEntry.category : null;
   var defaultAmount = editingEntry ? editingEntry.amount : '';
   var defaultMemo = editingEntry ? (editingEntry.memo || '') : '';
+  var defaultRice = editingEntry ? (editingEntry.riceAmount || '') : '';
+  var riceCategoryNames = {};
+  config.categories.forEach(function(c) { if (c.riceBudget > 0) riceCategoryNames[c.name] = true; });
 
   var payerOptions = config.payers.map(function(p) { return optionHtml(p, p === defaultPayer); }).join('');
   var methodOptions = config.paymentMethods.map(function(m) { return optionHtml(m, m === defaultMethod); }).join('');
@@ -618,10 +654,20 @@ function render() {
         '(繰越 ' + (w.carryover > 0 ? '+' : '') + fmtYen(w.carryover) + ')</div>' +
       '</div>';
     }
+    var riceHtml = '';
+    var rp = ricePool(c, log, SELECTED_MONTH);
+    if (rp) {
+      riceHtml = '<div style="margin:8px 0 0 12px; padding-left:10px; border-left:3px solid var(--blue-soft);">' +
+        '<div class="top" style="font-size:12px;"><span style="color:var(--muted); font-weight:700;">お米枠(繰越あり・毎月 +' + fmtYen(c.riceBudget) + ')</span>' +
+        '<span class="amt">のこり <span style="font-weight:700; color:' + (rp.remaining < 0 ? 'var(--bad)' : 'var(--good)') + ';">' + fmtYen(rp.remaining) + '</span></span></div>' +
+        '<div style="font-size:11px; margin-top:2px; color:var(--muted);">前月からの繰越 ' + fmtYen(rp.remaining + rp.spentMonth - c.riceBudget) + ' + 今月分 ' + fmtYen(c.riceBudget) + ' − この月のお米代 ' + fmtYen(rp.spentMonth) + '</div>' +
+        '<div style="font-size:11px; color:var(--muted);">※お米代はスーパーの金額には含みません。使わなかった分は翌月に繰り越します</div>' +
+      '</div>';
+    }
     return groupHtml + '<div class="cat-row">' +
       '<div class="top"><span class="name">' + escapeHtml(c.name) + '</span><span class="amt">' + fmtYen(used) + ' / ' + fmtYen(c.budget) + '</span></div>' +
       '<div class="bar-outer"><div class="bar-inner ' + barClass + '" style="width:' + pct + '%"></div></div>' +
-      weekHtml +
+      weekHtml + riceHtml +
       '</div>';
   }).join('');
 
@@ -643,7 +689,7 @@ function render() {
       return (a.createdAt || '') < (b.createdAt || '') ? 1 : -1;
     });
   var recent = monthEntries.map(function(e) {
-    return '<tr class="recent-row"><td>' + escapeHtml(e.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
+    return '<tr class="recent-row"><td>' + escapeHtml(e.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + (e.riceAmount ? '<br><span style="font-size:11px; color:var(--muted);">うちお米代 ' + fmtYen(e.riceAmount) + '</span>' : '') + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
       '<td class="op-cell"><button type="button" class="icon-btn edit" data-edit="' + escapeHtml(e.id) + '">✎</button><button type="button" class="icon-btn danger" data-del="' + escapeHtml(e.id) + '">✕</button></td></tr>';
   }).join('');
 
@@ -677,6 +723,11 @@ function render() {
           '<div class="field"><label>支払者</label><select id="f_payer">' + payerOptions + '</select></div>' +
         '</div>' +
         '<div class="field"><label>カテゴリ</label><select id="f_category">' + categoryOptions + '</select></div>' +
+        // お米枠のあるカテゴリ(スーパー)のときだけ出す。チェックするとお米代の欄が開く
+        '<div class="field" id="riceBox" style="display:none;">' +
+          '<label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--navy);"><input type="checkbox" id="f_hasRice" style="width:auto; margin:0;"' + (defaultRice ? ' checked' : '') + '>お米を含む</label>' +
+          '<div id="riceAmountBox" style="margin-top:6px;' + (defaultRice ? '' : ' display:none;') + '"><label>お米代</label><input type="number" id="f_rice" inputmode="numeric" placeholder="0" value="' + escapeHtml(defaultRice || '') + '"></div>' +
+        '</div>' +
         '<div class="row2">' +
           '<div class="field"><label>金額</label><input type="number" id="f_amount" inputmode="numeric" placeholder="0" value="' + escapeHtml(defaultAmount) + '"></div>' +
           '<div class="field"><label>支払い方法</label><select id="f_method">' + methodOptions + '</select></div>' +
@@ -707,6 +758,16 @@ function render() {
     '<div class="footer-link"><button type="button" id="logoutBtn">ログアウト</button></div>';
 
   document.getElementById('entryForm').addEventListener('submit', onSubmit);
+  var catSel = document.getElementById('f_category');
+  var hasRiceCb = document.getElementById('f_hasRice');
+  function syncRiceBox() {
+    var show = !!riceCategoryNames[catSel.value];
+    document.getElementById('riceBox').style.display = show ? '' : 'none';
+    document.getElementById('riceAmountBox').style.display = (show && hasRiceCb.checked) ? '' : 'none';
+  }
+  catSel.addEventListener('change', syncRiceBox);
+  hasRiceCb.addEventListener('change', syncRiceBox);
+  syncRiceBox();
   document.querySelectorAll('[data-edit]').forEach(function(btn) {
     btn.addEventListener('click', function() { startEdit(btn.dataset.edit); });
   });
@@ -781,6 +842,10 @@ async function onSubmit(ev) {
     paymentMethod: document.getElementById('f_method').value,
     memo: document.getElementById('f_memo').value
   };
+  // お米枠の対象カテゴリでチェックが入っているときだけお米代を送る
+  var riceBoxEl = document.getElementById('riceBox');
+  entry.hasRice = riceBoxEl.style.display !== 'none' && document.getElementById('f_hasRice').checked;
+  entry.riceAmount = document.getElementById('f_rice').value;
 
   btn.disabled = true;
   btn.textContent = '送信中...';
@@ -1004,7 +1069,7 @@ function cardDueForMonth(a, account, month) {
 }
 
 function dashTotals(a, month) {
-  var catTotals = {}, leafTotals = {}, incomeTotals = {}, totalIncome = 0;
+  var catTotals = {}, leafTotals = {}, incomeTotals = {}, totalIncome = 0, riceMonth = 0;
   var snap = a.monthlySnapshots[month];
   (snap ? snap.transactions : []).forEach(function(t) {
     if (t.category === TRANSFER_CATEGORY) return;
@@ -1012,16 +1077,43 @@ function dashTotals(a, month) {
     if (t.amount < 0) {
       var leaf = t.category || 'その他';
       var parent = t.category ? leafToParent(a, t.category) : 'その他';
-      catTotals[parent] = (catTotals[parent] || 0) + Math.abs(t.amount);
-      leafTotals[leaf] = (leafTotals[leaf] || 0) + Math.abs(t.amount);
+      // お米代はお米枠で別に管理するので、予算の集計からは除く(PC版と同じ)
+      var rice = Number(t.riceAmount) || 0;
+      riceMonth += rice;
+      catTotals[parent] = (catTotals[parent] || 0) + Math.abs(t.amount) - rice;
+      leafTotals[leaf] = (leafTotals[leaf] || 0) + Math.abs(t.amount) - rice;
     } else if (t.amount > 0) {
       var inc = t.category || '未分類';
       incomeTotals[inc] = (incomeTotals[inc] || 0) + t.amount;
       totalIncome += t.amount;
     }
   });
-  var totalSpend = Object.keys(catTotals).reduce(function(s, k) { return s + catTotals[k]; }, 0);
-  return { catTotals: catTotals, leafTotals: leafTotals, incomeTotals: incomeTotals, totalIncome: totalIncome, totalSpend: totalSpend };
+  var budgetSpend = Object.keys(catTotals).reduce(function(s, k) { return s + catTotals[k]; }, 0);
+  return { catTotals: catTotals, leafTotals: leafTotals, incomeTotals: incomeTotals, totalIncome: totalIncome,
+    budgetSpend: budgetSpend, totalSpend: budgetSpend + riceMonth };
+}
+
+// お米枠(PC版と同じ): 開始月から毎月 riceBudget ずつたまり、お米代の分だけ減る
+function dashRicePool(a, leaf, month) {
+  if (!(leaf.riceBudget > 0) || !leaf.riceStartMonth || month < leaf.riceStartMonth) return null;
+  var months = (+month.slice(0, 4) - +leaf.riceStartMonth.slice(0, 4)) * 12 + (+month.slice(5, 7) - +leaf.riceStartMonth.slice(5, 7)) + 1;
+  var total = 0, inMonth = 0;
+  Object.keys(a.monthlySnapshots).forEach(function(m) {
+    if (m < leaf.riceStartMonth || m > month) return;
+    a.monthlySnapshots[m].transactions.forEach(function(t) {
+      if (!t.riceAmount || t.excluded || t.category === TRANSFER_CATEGORY) return;
+      total += Number(t.riceAmount);
+      if (m === month) inMonth += Number(t.riceAmount);
+    });
+  });
+  return { remaining: months * leaf.riceBudget - total, spentMonth: inMonth };
+}
+function dashRiceRowHtml(a, leaf, month) {
+  var rp = dashRicePool(a, leaf, month);
+  if (!rp) return '';
+  return '<div class="dash-row child" style="cursor:default;"><div class="top"><span class="name">└ お米枠(繰越あり・毎月 +' + fmtYen(leaf.riceBudget) + ')</span>' +
+    '<span class="amt">のこり <span style="color:' + (rp.remaining < 0 ? 'var(--bad)' : 'var(--good)') + ';">' + fmtYen(rp.remaining) + '</span></span></div>' +
+    '<div class="sub">前月からの繰越 ' + fmtYen(rp.remaining + rp.spentMonth - leaf.riceBudget) + ' + 今月分 ' + fmtYen(leaf.riceBudget) + ' − この月のお米代 ' + fmtYen(rp.spentMonth) + '(お米代はスーパーの金額に含みません)</div></div>';
 }
 
 // 予算バーをタップしたときの明細(PCアプリと同じく、振替・計算対象外もそのまま表示する)
@@ -1042,6 +1134,7 @@ function dashDetailHtml(a, month, key) {
   var rows = txns.map(function(t) {
     return '<tr><td style="white-space:nowrap;">' + escapeHtml(t.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(t.desc) +
       (t.logMemo ? '<div class="memo">📝 ' + escapeHtml(t.logMemo) + '</div>' : '') +
+      (t.riceAmount ? '<div class="memo">🍚 うちお米代 ' + fmtYen(t.riceAmount) + '(お米枠から)</div>' : '') +
       (t.excluded ? '<div class="memo">(計算対象外)</div>' : '') +
       '</td><td style="white-space:nowrap; text-align:right;">' + fmtYen(Math.abs(t.amount)) + '</td></tr>';
   }).join('');
@@ -1121,7 +1214,7 @@ function renderDashboard() {
   // 今月の予算: 支出全体 → 大項目(子があればタップで子を一括開閉)→ 小項目(タップで明細)
   var totalBudget = 0;
   a.categories.forEach(function(cat) { totalBudget += parentBudget(cat); });
-  var budgetHtml = dashBudgetRow('支出全体', t.totalSpend, totalBudget, { attrs: ' style="cursor:default;"' });
+  var budgetHtml = dashBudgetRow('支出全体', t.budgetSpend, totalBudget, { attrs: ' style="cursor:default;"' });
   a.categories.forEach(function(cat) {
     var hasChildren = cat.children && cat.children.length > 0;
     if (hasChildren) {
@@ -1137,6 +1230,7 @@ function renderDashboard() {
           child: true, caret: DASH.expanded[key] ? '▲' : '▼', attrs: ' data-key="' + escapeHtml(key) + '"'
         });
         if (DASH.expanded[key]) budgetHtml += dashDetailHtml(a, month, key);
+        budgetHtml += dashRiceRowHtml(a, child, month);
       });
     } else {
       var k = 'leaf:' + cat.name;
