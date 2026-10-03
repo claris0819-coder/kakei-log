@@ -897,10 +897,10 @@ function purposeFlows(a, pa) {
   var out = [];
   Object.keys(a.monthlySnapshots || {}).forEach(function(m) {
     (a.monthlySnapshots[m].transactions || []).forEach(function(t) {
-      if (t.accountId === pa.parentAccountId && normDesc(t.desc) === key) out.push({ date: t.date, amount: -t.amount });
+      if (t.accountId === pa.parentAccountId && normDesc(t.desc) === key) out.push({ date: t.date, amount: -t.amount, kind: 'csv' });
     });
   });
-  (pa.adjustments || []).forEach(function(x) { out.push({ date: x.date, amount: x.amount }); });
+  (pa.adjustments || []).forEach(function(x) { out.push({ date: x.date, amount: x.amount, note: x.note, kind: 'move' }); });
   return out;
 }
 function purposeBalanceAtMonthEnd(a, pa, month, flows) {
@@ -912,22 +912,63 @@ function purposeBalanceAtMonthEnd(a, pa, month, flows) {
   });
   return bal;
 }
+function prevMonthOf(month) {
+  var y = parseInt(month.slice(0, 4), 10), m = parseInt(month.slice(5, 7), 10) - 1;
+  if (m === 0) { y--; m = 12; }
+  return y + '-' + (m < 10 ? '0' : '') + m;
+}
+function signedYen(n) { return n === 0 ? '±0' : (n > 0 ? '+' : '-') + fmtYen(Math.abs(n)); }
+
+// PC版と同じ: 代表口座+目的別口座を、前月末 → 増減 → 月末(最新)で表示する
 function purposeDashHtml(a, month) {
-  var tBal = 0;
-  var rows = (a.purposeAccounts || []).map(function(pa) {
-    var flows = purposeFlows(a, pa);
-    var bal = purposeBalanceAtMonthEnd(a, pa, month, flows);
-    var inSum = 0, outSum = 0;
-    flows.forEach(function(f) {
-      if (f.date.slice(0, 7) !== month) return;
-      if (f.amount > 0) inSum += f.amount; else outSum -= f.amount;
+  var prev = prevMonthOf(month);
+  var snap = a.monthlySnapshots[month];
+  var html = '';
+  (a.accounts || []).filter(function(acc) { return acc.type === 'bank'; }).forEach(function(bank) {
+    var pas = (a.purposeAccounts || []).filter(function(pa) { return pa.parentAccountId === bank.id; });
+    if (!pas.length) return;
+    var asOf = snap && snap.accountBalanceDates && snap.accountBalanceDates[bank.id];
+    var rows = [], toPurpose = 0, fromPurpose = 0;
+    pas.forEach(function(pa) {
+      var flows = purposeFlows(a, pa);
+      var start = purposeBalanceAtMonthEnd(a, pa, prev, flows);
+      var end = purposeBalanceAtMonthEnd(a, pa, month, flows);
+      var dep = 0, wd = 0, mv = 0, names = {};
+      flows.forEach(function(f) {
+        if (f.date.slice(0, 7) !== month) return;
+        if (f.kind === 'move') { mv += f.amount; if (f.note) names[f.note] = true; }
+        else if (f.amount > 0) dep += f.amount; else wd += f.amount;
+      });
+      toPurpose += dep; fromPurpose -= wd;
+      var parts = [];
+      if (dep) parts.push('積立 ' + signedYen(dep));
+      if (wd) parts.push('取り崩し ' + signedYen(wd));
+      if (mv) parts.push(Object.keys(names).join('・') + (mv > 0 ? 'から ' : 'へ ') + signedYen(mv));
+      rows.push({ name: pa.name, start: start, end: end, detail: parts.join(' / '), child: true });
     });
-    tBal += bal;
-    var sub = [inSum ? '入金 ' + fmtYen(inSum) : '', outSum ? '出金 ' + fmtYen(outSum) : ''].filter(Boolean).join(' / ');
-    return '<div class="dash-row" style="cursor:default;"><div class="top"><span class="name">' + escapeHtml(pa.name) + '</span><span class="amt">' + fmtYen(bal) + '</span></div>' +
-      (sub ? '<div class="sub" style="text-align:left;">' + sub + '</div>' : '') + '</div>';
-  }).join('');
-  return rows + '<div style="text-align:right; font-size:13px; font-weight:700; padding-top:8px;">合計 ' + fmtYen(tBal) + '</div>';
+    var bStart = balanceAt(a, bank.id, prev), bEnd = balanceAt(a, bank.id, month);
+    var bankFlow = (snap ? snap.transactions : []).filter(function(t) { return t.accountId === bank.id; })
+      .reduce(function(s, t) { return s + t.amount; }, 0);
+    var other = bankFlow + toPurpose - fromPurpose;
+    var bParts = [];
+    if (toPurpose) bParts.push('目的別口座へ ' + signedYen(-toPurpose));
+    if (fromPurpose) bParts.push('目的別口座から ' + signedYen(fromPurpose));
+    if (other) bParts.push('それ以外の入出金 ' + signedYen(other));
+    rows.unshift({ name: bank.name + '(代表口座)', start: bStart, end: bEnd, detail: bParts.join(' / '), child: false });
+
+    var tStart = 0, tEnd = 0;
+    html += '<div class="sub" style="text-align:right; margin-bottom:4px;">残高は' + (asOf ? escapeHtml(asOf.slice(5).replace('-', '/')) + '時点' : '月末') + '・()内は前月末からの増減</div>';
+    rows.forEach(function(r) {
+      tStart += r.start; tEnd += r.end;
+      html += '<div class="dash-row" style="cursor:default;' + (r.child ? ' padding-left:14px;' : '') + '">' +
+        '<div class="top"><span class="name"' + (r.child ? '' : ' style="font-weight:700;"') + '>' + escapeHtml(r.name) + '</span>' +
+        '<span class="amt">' + fmtYen(r.end) + ' <span style="font-size:11px; font-weight:400; color:var(--muted);">(' + signedYen(r.end - r.start) + ')</span></span></div>' +
+        (r.detail ? '<div class="sub" style="text-align:left;">' + escapeHtml(r.detail) + '</div>' : '') + '</div>';
+    });
+    html += '<div style="text-align:right; font-size:13px; font-weight:700; padding-top:8px;">合計 ' + fmtYen(tEnd) +
+      ' <span style="font-size:11px; font-weight:400; color:var(--muted);">(' + signedYen(tEnd - tStart) + ')</span></div>';
+  });
+  return html;
 }
 
 function leafToParent(a, leaf) {
@@ -1150,7 +1191,7 @@ function renderDashboard() {
       '<div class="saved-at">PCの資産管理アプリで最後に保存: ' + escapeHtml(formatSavedAt(DASH.savedAt) || '不明') + '(CSV取込・分類はPCで行います)</div>' +
     '</div>' +
     '<div class="card"><h2>純資産の推移</h2>' + netWorthChartSvg(a, months) + '</div>' +
-    ((a.purposeAccounts || []).length ? '<div class="card"><h2>目的別口座(' + month + '末)</h2>' + purposeDashHtml(a, month) + '</div>' : '') +
+    ((a.purposeAccounts || []).length ? '<div class="card"><h2>銀行口座の残高(' + month + ')</h2>' + purposeDashHtml(a, month) + '</div>' : '') +
     '<div class="card"><h2>予算(' + month + ')</h2>' + budgetHtml + '</div>' +
     '<div class="card"><h2>収入(' + month + ')</h2>' + incomeHtml + '</div>' +
     '<div class="card"><h2>クレジットカード引落とし予定(' + month + ')</h2>' + cardHtml + '</div>';
