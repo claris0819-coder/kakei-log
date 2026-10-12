@@ -69,6 +69,8 @@
     color: var(--navy);
   }
   .row2 { display: flex; gap: 8px; }
+  .week-opt { flex: 1; padding: 8px 6px; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--white); color: var(--navy); }
+  .week-opt.active { background: var(--blue); border-color: var(--blue); color: var(--white); font-weight: 700; }
   .row2 > div { flex: 1; }
   button.btn {
     width: 100%;
@@ -156,6 +158,14 @@
   #refreshBtn:disabled, #dashRefreshBtn:disabled { opacity: 0.5; }
   .login-box { text-align: center; padding: 24px 8px; }
   .login-box p { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 18px; }
+  .update-bar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px; background: var(--blue); color: var(--white); padding: 10px 14px; font-size: 13px; font-weight: 700; }
+  .update-bar span { flex: 1; }
+  .update-bar button { background: var(--white); color: var(--blue); border: none; border-radius: 6px; padding: 6px 12px; font-weight: 700; font-size: 13px; }
+  .whats-new { max-width: 720px; margin: 12px auto 0; padding: 0 12px; }
+  .whats-new .card { border: 2px solid var(--blue); }
+  .whats-new h2 { margin-bottom: 6px; }
+  .whats-new .ver { font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-weight: 700; }
+  .whats-new ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
   .footer-link { text-align: center; margin-top: 8px; }
   .footer-link button { background: none; border: none; color: var(--muted); font-size: 12px; text-decoration: underline; cursor: pointer; }
   /* 入力/ダッシュボードの切り替え */
@@ -195,6 +205,8 @@
   <button type="button" data-view="input" class="active">入力</button>
   <button type="button" data-view="dash">ダッシュボード</button>
 </nav>
+<div id="updateBar" class="update-bar" hidden></div>
+<div id="whatsNew"></div>
 <main id="app">
   <div class="loading" id="loading">読み込み中...</div>
 </main>
@@ -422,6 +434,7 @@ async function submitEntry(entry) {
     createdAt: new Date().toISOString()
   };
   if (rice) rec.riceAmount = rice;
+  if (entry.budgetWeek) rec.budgetWeek = entry.budgetWeek;
   log.push(rec);
   await writeJson(LOG_FILE_NAME, log);
   return { config: STATE.config, log: log };
@@ -445,6 +458,7 @@ async function updateEntry(id, entry) {
     updatedAt: new Date().toISOString()
   };
   if (rice) log[idx].riceAmount = rice;
+  if (entry.budgetWeek) log[idx].budgetWeek = entry.budgetWeek;
   await writeJson(LOG_FILE_NAME, log);
   return { config: STATE.config, log: log };
 }
@@ -493,12 +507,27 @@ function addDays(d, n) {
 // 週予算(config.categories の weeklyBudget)。週は月曜〜日曜の7日間で、月をまたいでも
 // 1週分の予算とする。週は「月曜日が属する月」の週として数え(例: 9/28〜10/4は9月第4週)。
 // 繰越額(同じ月の前の週までの残り/超過の合計、月が変わるとリセット)は参考表示のみで、
-// 使いすぎ防止のため今週の予算には加算しない
+// 使いすぎ防止のため今週の予算には加算しない。
+// 各記録がどの週の予算に入るかは、入力時に選んだ「今週分/来週分」(budgetWeek)で決める。
+// 土日に翌週分をまとめ買いすることが多いため、選択の無い記録(以前の記録)は
+// 土日なら来週分・平日なら今週分とみなす
+function parseYmd(s) { return new Date(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)); }
+function mondayOf(d) { return addDays(d, -((d.getDay() + 6) % 7)); }
+function defaultBudgetWeek(dateStr) { var wd = parseYmd(dateStr).getDay(); return (wd === 0 || wd === 6) ? 'next' : 'this'; }
+function budgetWeekMonday(e) {
+  var mon = mondayOf(parseYmd(e.date));
+  return (e.budgetWeek || defaultBudgetWeek(e.date)) === 'next' ? addDays(mon, 7) : mon;
+}
+function weekRangeLabel(mon) {
+  var sun = addDays(mon, 6);
+  return (mon.getMonth() + 1) + '/' + mon.getDate() + '〜' + (sun.getMonth() + 1) + '/' + sun.getDate();
+}
+
 function weeklyStatus(c, log, today) {
-  function spentBetween(start, end) {
-    var s = ymd(start), e2 = ymd(end), sum = 0;
+  function spentBetween(start) {
+    var key = ymd(start), sum = 0;
     log.forEach(function(e) {
-      if (e.category === c.name && e.date && e.date >= s && e.date <= e2) sum += budgetAmount(e);
+      if (e.category === c.name && e.date && ymd(budgetWeekMonday(e)) === key) sum += budgetAmount(e);
     });
     return sum;
   }
@@ -507,14 +536,14 @@ function weeklyStatus(c, log, today) {
   var ownerMonth = monday.getMonth();
   var carryover = 0, weekNo = 1;
   for (var m = addDays(monday, -7); m.getMonth() === ownerMonth; m = addDays(m, -7)) {
-    carryover += c.weeklyBudget - spentBetween(m, addDays(m, 6));
+    carryover += c.weeklyBudget - spentBetween(m);
     weekNo++;
   }
   return {
     label: (ownerMonth + 1) + '月第' + weekNo + '週',
     range: (monday.getMonth() + 1) + '/' + monday.getDate() + '〜' + (sunday.getMonth() + 1) + '/' + sunday.getDate(),
     carryover: carryover,
-    spent: spentBetween(monday, sunday)
+    spent: spentBetween(monday)
   };
 }
 
@@ -579,6 +608,9 @@ function render() {
   var defaultRice = editingEntry ? (editingEntry.riceAmount || '') : '';
   var riceCategoryNames = {};
   config.categories.forEach(function(c) { if (c.riceBudget > 0) riceCategoryNames[c.name] = true; });
+  var weeklyCategoryNames = {};
+  config.categories.forEach(function(c) { if (c.weeklyBudget > 0) weeklyCategoryNames[c.name] = true; });
+  var defaultWeekChoice = editingEntry ? (editingEntry.budgetWeek || defaultBudgetWeek(editingEntry.date)) : null;
 
   var payerOptions = config.payers.map(function(p) { return optionHtml(p, p === defaultPayer); }).join('');
   var methodOptions = config.paymentMethods.map(function(m) { return optionHtml(m, m === defaultMethod); }).join('');
@@ -689,7 +721,8 @@ function render() {
       return (a.createdAt || '') < (b.createdAt || '') ? 1 : -1;
     });
   var recent = monthEntries.map(function(e) {
-    return '<tr class="recent-row"><td>' + escapeHtml(e.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + (e.riceAmount ? '<br><span style="font-size:11px; color:var(--muted);">うちお米代 ' + fmtYen(e.riceAmount) + '</span>' : '') + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
+    return '<tr class="recent-row"><td>' + escapeHtml(e.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + (e.riceAmount ? '<br><span style="font-size:11px; color:var(--muted);">うちお米代 ' + fmtYen(e.riceAmount) + '</span>' : '') +
+      (weeklyCategoryNames[e.category] && (e.budgetWeek || defaultBudgetWeek(e.date)) === 'next' ? '<br><span style="font-size:11px; color:var(--blue);">来週分</span>' : '') + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
       '<td class="op-cell"><button type="button" class="icon-btn edit" data-edit="' + escapeHtml(e.id) + '">✎</button><button type="button" class="icon-btn danger" data-del="' + escapeHtml(e.id) + '">✕</button></td></tr>';
   }).join('');
 
@@ -723,6 +756,12 @@ function render() {
           '<div class="field"><label>支払者</label><select id="f_payer">' + payerOptions + '</select></div>' +
         '</div>' +
         '<div class="field"><label>カテゴリ</label><select id="f_category">' + categoryOptions + '</select></div>' +
+        // 週予算のあるカテゴリ(スーパー)のときだけ出す。どの週の予算に入れるか
+        '<div class="field" id="weekBox" style="display:none;"><label>週予算に入れる週</label>' +
+          '<div class="week-toggle" style="display:flex; gap:6px;">' +
+            '<button type="button" class="week-opt" data-week="this"></button>' +
+            '<button type="button" class="week-opt" data-week="next"></button>' +
+          '</div></div>' +
         // お米枠のあるカテゴリ(スーパー)のときだけ出す。チェックするとお米代の欄が開く
         '<div class="field" id="riceBox" style="display:none;">' +
           '<label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--navy);"><input type="checkbox" id="f_hasRice" style="width:auto; margin:0;"' + (defaultRice ? ' checked' : '') + '>お米を含む</label>' +
@@ -755,7 +794,7 @@ function render() {
       '<tbody>' + (recent || '<tr><td colspan="7" style="color:var(--muted)">この月の入力はまだありません</td></tr>') + '</tbody></table></div>' +
     '</div>' +
 
-    '<div class="footer-link"><button type="button" id="logoutBtn">ログアウト</button></div>';
+    '<div class="footer-link"><button type="button" id="historyBtn">更新履歴</button> <button type="button" id="logoutBtn">ログアウト</button></div>';
 
   document.getElementById('entryForm').addEventListener('submit', onSubmit);
   var catSel = document.getElementById('f_category');
@@ -768,6 +807,31 @@ function render() {
   catSel.addEventListener('change', syncRiceBox);
   hasRiceCb.addEventListener('change', syncRiceBox);
   syncRiceBox();
+
+  // 今週分/来週分: 日付が変わるたびに週の日付を表示し直す。手で選ぶまでは日付から自動で決める
+  var dateInput = document.getElementById('f_date');
+  var weekChoice = defaultWeekChoice, weekChosenByHand = !!editingEntry;
+  function syncWeekBox() {
+    var show = !!weeklyCategoryNames[catSel.value] && !!dateInput.value;
+    document.getElementById('weekBox').style.display = show ? '' : 'none';
+    if (!show) return;
+    if (!weekChosenByHand) weekChoice = defaultBudgetWeek(dateInput.value);
+    var mon = mondayOf(parseYmd(dateInput.value));
+    document.querySelectorAll('.week-opt').forEach(function(b) {
+      var isNext = b.dataset.week === 'next';
+      b.textContent = (isNext ? '来週分' : '今週分') + '(' + weekRangeLabel(isNext ? addDays(mon, 7) : mon) + ')';
+      b.classList.toggle('active', b.dataset.week === weekChoice);
+    });
+  }
+  document.querySelectorAll('.week-opt').forEach(function(b) {
+    b.addEventListener('click', function() { weekChoice = b.dataset.week; weekChosenByHand = true; syncWeekBox(); });
+  });
+  catSel.addEventListener('change', syncWeekBox);
+  dateInput.addEventListener('change', syncWeekBox);
+  syncWeekBox();
+  STATE.getWeekChoice = function() {
+    return document.getElementById('weekBox').style.display !== 'none' ? weekChoice : null;
+  };
   document.querySelectorAll('[data-edit]').forEach(function(btn) {
     btn.addEventListener('click', function() { startEdit(btn.dataset.edit); });
   });
@@ -786,6 +850,7 @@ function render() {
   document.getElementById('logoutBtn').addEventListener('click', function() {
     if (confirm('ログアウトしますか?')) logout();
   });
+  document.getElementById('historyBtn').addEventListener('click', function() { showWhatsNew(true); });
 }
 
 async function refreshData() {
@@ -846,6 +911,7 @@ async function onSubmit(ev) {
   var riceBoxEl = document.getElementById('riceBox');
   entry.hasRice = riceBoxEl.style.display !== 'none' && document.getElementById('f_hasRice').checked;
   entry.riceAmount = document.getElementById('f_rice').value;
+  entry.budgetWeek = STATE.getWeekChoice ? STATE.getWeekChoice() : null;
 
   btn.disabled = true;
   btn.textContent = '送信中...';
@@ -1351,8 +1417,77 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
   b.addEventListener('click', function() { switchView(b.dataset.view); });
 });
 
+/* ============================================================
+   アプリの更新のお知らせ
+   ------------------------------------------------------------
+   アプリを更新するときは、APP_VERSION と version.json の version を同じ値に上げ、
+   CHANGELOG の先頭に変更内容(利用者向けの言葉で)を足す。
+   - 開いている間に新しい版が公開されたら、上部に「更新する」バーを出す
+     (iPhoneのホーム画面アプリは再読み込みされずに古い版のまま再開されることがあるため、
+     起動時と画面に戻ってきたときに version.json を確認する)
+   - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
+   ============================================================ */
+var APP_VERSION = '2026-10-12';
+var CHANGELOG = [
+  { version: '2026-10-12', title: 'スーパーの週予算を「今週分/来週分」で選べるようになりました', items: [
+    'スーパーを選ぶと「今週分/来週分」の切り替えが出ます。週予算(1万円)は選んだ週で数えます',
+    '土日に入力したときは、最初から「来週分」になっています(まとめ買い用)。その週末に食べる分は「今週分」に切り替えてください',
+    '入力一覧では、来週分にした記録に「来週分」と表示されます。編集で切り替えもできます',
+    'この画面の一番下の「更新履歴」から、いつでも更新内容を見られます'
+  ] },
+  { version: '2026-10-03', title: 'お米枠・周期予算・銀行口座の残高', items: [
+    'スーパーで「お米を含む」にチェックすると、お米代をスーパーの予算とは別の「お米枠」(毎月+3,500円・繰越あり)で管理します',
+    'ダッシュボードで、水道は2か月ごと、年会費は12か月ごとの予算で表示します',
+    'ダッシュボードに、代表口座と目的別口座の残高(前月末からの増減つき)を表示します',
+    '食費の合計行(スーパー+外食)を表示します'
+  ] }
+];
+var SEEN_VERSION_KEY = 'kakeiSeenVersion';
+
+function showWhatsNew(all) {
+  var seen = storageGet(SEEN_VERSION_KEY);
+  var items = all ? CHANGELOG : CHANGELOG.filter(function(c) { return !seen || c.version > seen; });
+  if (!all && !seen) items = CHANGELOG.slice(0, 1);
+  if (!items.length) return;
+  document.getElementById('whatsNew').innerHTML = '<div class="whats-new"><div class="card">' +
+    '<h2>' + (all ? '更新履歴' : 'アプリが更新されました') + '</h2>' +
+    items.map(function(c) {
+      return '<div class="ver">' + escapeHtml(c.version) + ' ' + escapeHtml(c.title) + '</div><ul>' +
+        c.items.map(function(t) { return '<li>' + escapeHtml(t) + '</li>'; }).join('') + '</ul>';
+    }).join('') +
+    '<button type="button" class="btn" id="whatsNewOk" style="margin-top:12px;">' + (all ? '閉じる' : 'OK') + '</button>' +
+  '</div></div>';
+  document.getElementById('whatsNewOk').addEventListener('click', function() {
+    storageSet(SEEN_VERSION_KEY, APP_VERSION);
+    document.getElementById('whatsNew').innerHTML = '';
+  });
+  window.scrollTo(0, 0);
+}
+
+var lastUpdateCheck = 0;
+async function checkForUpdate() {
+  if (Date.now() - lastUpdateCheck < 60000) return;
+  lastUpdateCheck = Date.now();
+  try {
+    var res = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) return;
+    var latest = (await res.json()).version;
+    if (!latest || latest <= APP_VERSION) return;
+    var bar = document.getElementById('updateBar');
+    bar.innerHTML = '<span>新しいバージョンがあります</span><button type="button" id="updateNowBtn">更新する</button>';
+    bar.hidden = false;
+    document.getElementById('updateNowBtn').addEventListener('click', function() {
+      // URLに版を付けて開き直し、古い画面がキャッシュから返されないようにする
+      location.replace(location.pathname + '?v=' + encodeURIComponent(latest));
+    });
+  } catch (e) { /* オフライン等は無視 */ }
+}
+document.addEventListener('visibilitychange', function() { if (!document.hidden) checkForUpdate(); });
+window.addEventListener('focus', checkForUpdate);
+
 /* ---------- 起動 ---------- */
 async function boot() {
+  checkForUpdate();
   if (CLIENT_ID.indexOf('YOUR_CLIENT_ID') === 0) {
     document.getElementById('app').innerHTML = '<div class="card login-box"><p>ログイン設定(クライアントID)がまだ入っていません。</p></div>';
     return;
@@ -1379,6 +1514,7 @@ async function boot() {
     STATE.log = data.log;
     document.getElementById('tabs').hidden = false;
     render();
+    showWhatsNew(false);
     rememberLoginHint();
   } catch (err) {
     document.getElementById('app').innerHTML =
