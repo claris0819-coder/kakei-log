@@ -518,10 +518,10 @@ function budgetWeekMonday(e) {
   var mon = mondayOf(parseYmd(e.date));
   return (e.budgetWeek || defaultBudgetWeek(e.date)) === 'next' ? addDays(mon, 7) : mon;
 }
-function weekRangeLabel(mon) {
-  var sun = addDays(mon, 6);
-  return (mon.getMonth() + 1) + '/' + mon.getDate() + '〜' + (sun.getMonth() + 1) + '/' + sun.getDate();
-}
+var WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+// 「10/5(月)」の形式
+function mdw(d) { return (d.getMonth() + 1) + '/' + d.getDate() + '(' + WEEKDAYS[d.getDay()] + ')'; }
+function weekRangeLabel(mon) { return mdw(mon) + '〜' + mdw(addDays(mon, 6)); }
 
 function weeklyStatus(c, log, today) {
   function spentBetween(start) {
@@ -541,7 +541,7 @@ function weeklyStatus(c, log, today) {
   }
   return {
     label: (ownerMonth + 1) + '月第' + weekNo + '週',
-    range: (monday.getMonth() + 1) + '/' + monday.getDate() + '〜' + (sunday.getMonth() + 1) + '/' + sunday.getDate(),
+    range: weekRangeLabel(monday),
     carryover: carryover,
     spent: spentBetween(monday)
   };
@@ -721,7 +721,7 @@ function render() {
       return (a.createdAt || '') < (b.createdAt || '') ? 1 : -1;
     });
   var recent = monthEntries.map(function(e) {
-    return '<tr class="recent-row"><td>' + escapeHtml(e.date.slice(5).replace('-', '/')) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + (e.riceAmount ? '<br><span style="font-size:11px; color:var(--muted);">うちお米代 ' + fmtYen(e.riceAmount) + '</span>' : '') +
+    return '<tr class="recent-row"><td style="white-space:nowrap;">' + escapeHtml(mdw(parseYmd(e.date))) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + (e.riceAmount ? '<br><span style="font-size:11px; color:var(--muted);">うちお米代 ' + fmtYen(e.riceAmount) + '</span>' : '') +
       (weeklyCategoryNames[e.category] && (e.budgetWeek || defaultBudgetWeek(e.date)) === 'next' ? '<br><span style="font-size:11px; color:var(--blue);">来週分</span>' : '') + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
       '<td class="op-cell"><button type="button" class="icon-btn edit" data-edit="' + escapeHtml(e.id) + '">✎</button><button type="button" class="icon-btn danger" data-del="' + escapeHtml(e.id) + '">✕</button></td></tr>';
   }).join('');
@@ -748,11 +748,12 @@ function render() {
     '</div>' +
 
     '<div class="card">' +
-      '<h2>' + (editingEntry ? '記録の編集' : '入力') + '</h2>' +
+      '<div class="card-head"><h2>' + (editingEntry ? '記録の編集' : '入力') + '</h2>' +
+        '<span style="font-size:13px; font-weight:700; color:var(--navy);">今日 ' + (today.getMonth() + 1) + '月' + today.getDate() + '日(' + WEEKDAYS[today.getDay()] + ')</span></div>' +
       (editingEntry ? '<div class="edit-banner"><span>この記録を編集中です</span><button type="button" id="cancelEditBtn">キャンセル</button></div>' : '') +
       '<form id="entryForm">' +
         '<div class="row2">' +
-          '<div class="field"><label>日付</label><input type="date" id="f_date" value="' + escapeHtml(defaultDate) + '"></div>' +
+          '<div class="field"><label>日付 <span id="f_date_wd" style="color:var(--blue);"></span></label><input type="date" id="f_date" value="' + escapeHtml(defaultDate) + '"></div>' +
           '<div class="field"><label>支払者</label><select id="f_payer">' + payerOptions + '</select></div>' +
         '</div>' +
         '<div class="field"><label>カテゴリ</label><select id="f_category">' + categoryOptions + '</select></div>' +
@@ -829,6 +830,12 @@ function render() {
   catSel.addEventListener('change', syncWeekBox);
   dateInput.addEventListener('change', syncWeekBox);
   syncWeekBox();
+  function syncDateWeekday() {
+    document.getElementById('f_date_wd').textContent = dateInput.value ? WEEKDAYS[parseYmd(dateInput.value).getDay()] + '曜日' : '';
+  }
+  dateInput.addEventListener('change', syncDateWeekday);
+  dateInput.addEventListener('input', syncDateWeekday);
+  syncDateWeekday();
   STATE.getWeekChoice = function() {
     return document.getElementById('weekBox').style.display !== 'none' ? weekChoice : null;
   };
@@ -1427,8 +1434,13 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
      起動時と画面に戻ってきたときに version.json を確認する)
    - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
    ============================================================ */
-var APP_VERSION = '2026-10-12';
+var APP_VERSION = '2026-10-12-2';
 var CHANGELOG = [
+  { version: '2026-10-12-2', title: '曜日を表示するようにしました', items: [
+    '入力欄の右上に、今日の日付と曜日(例: 今日 10月12日(月))を表示します',
+    '日付欄の横に、選んだ日の曜日を表示します',
+    '今週分/来週分のボタン、週予算、入力一覧の日付にも曜日を付けました(例: 10/5(月)〜10/11(日))'
+  ] },
   { version: '2026-10-12', title: 'スーパーの週予算を「今週分/来週分」で選べるようになりました', items: [
     'スーパーを選ぶと「今週分/来週分」の切り替えが出ます。週予算(1万円)は選んだ週で数えます',
     '土日に入力したときは、最初から「来週分」になっています(まとめ買い用)。その週末に食べる分は「今週分」に切り替えてください',
