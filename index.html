@@ -69,7 +69,7 @@
     color: var(--navy);
   }
   .row2 { display: flex; gap: 8px; }
-  .week-opt { flex: 1; padding: 8px 6px; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--white); color: var(--navy); }
+  .week-opt { flex: 1; padding: 8px 4px; font-size: 13px; white-space: nowrap; border: 1px solid var(--border); border-radius: 8px; background: var(--white); color: var(--navy); }
   .week-opt.active { background: var(--blue); border-color: var(--blue); color: var(--white); font-weight: 700; }
   .row2 > div { flex: 1; }
   button.btn {
@@ -522,6 +522,11 @@ var WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 // 「10/5(月)」の形式
 function mdw(d) { return (d.getMonth() + 1) + '/' + d.getDate() + '(' + WEEKDAYS[d.getDay()] + ')'; }
 function weekRangeLabel(mon) { return mdw(mon) + '〜' + mdw(addDays(mon, 6)); }
+// ボタン用の短い形式: 同じ月なら「10/12〜18」、月をまたぐなら「9/28〜10/4」
+function weekRangeShort(mon) {
+  var sun = addDays(mon, 6);
+  return (mon.getMonth() + 1) + '/' + mon.getDate() + '〜' + (sun.getMonth() === mon.getMonth() ? '' : (sun.getMonth() + 1) + '/') + sun.getDate();
+}
 
 function weeklyStatus(c, log, today) {
   function spentBetween(start) {
@@ -758,7 +763,7 @@ function render() {
         '</div>' +
         '<div class="field"><label>カテゴリ</label><select id="f_category">' + categoryOptions + '</select></div>' +
         // 週予算のあるカテゴリ(スーパー)のときだけ出す。どの週の予算に入れるか
-        '<div class="field" id="weekBox" style="display:none;"><label>週予算に入れる週</label>' +
+        '<div class="field" id="weekBox" style="display:none;"><label>週予算に入れる週(月〜日)</label>' +
           '<div class="week-toggle" style="display:flex; gap:6px;">' +
             '<button type="button" class="week-opt" data-week="this"></button>' +
             '<button type="button" class="week-opt" data-week="next"></button>' +
@@ -820,7 +825,7 @@ function render() {
     var mon = mondayOf(parseYmd(dateInput.value));
     document.querySelectorAll('.week-opt').forEach(function(b) {
       var isNext = b.dataset.week === 'next';
-      b.textContent = (isNext ? '来週分' : '今週分') + '(' + weekRangeLabel(isNext ? addDays(mon, 7) : mon) + ')';
+      b.textContent = (isNext ? '来週分 ' : '今週分 ') + weekRangeShort(isNext ? addDays(mon, 7) : mon);
       b.classList.toggle('active', b.dataset.week === weekChoice);
     });
   }
@@ -1434,8 +1439,11 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
      起動時と画面に戻ってきたときに version.json を確認する)
    - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
    ============================================================ */
-var APP_VERSION = '2026-10-12-2';
+var APP_VERSION = '2026-10-12-3';
 var CHANGELOG = [
+  { version: '2026-10-12-3', title: '今週分/来週分のボタンを1行に収めました', items: [
+    'ボタンの表示を「今週分 10/12〜18」のように短くしました(週は月曜〜日曜です)'
+  ] },
   { version: '2026-10-12-2', title: '曜日を表示するようにしました', items: [
     '入力欄の右上に、今日の日付と曜日(例: 今日 10月12日(月))を表示します',
     '日付欄の横に、選んだ日の曜日を表示します',
