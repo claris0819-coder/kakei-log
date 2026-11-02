@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>家計簿クイック入力</title>
+<title>Kakei-Log</title>
 <meta name="theme-color" content="#1B2030">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="家計簿">
+<meta name="apple-mobile-web-app-title" content="Kakei-Log">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" href="icon-192.png">
@@ -200,7 +200,7 @@
 </style>
 </head>
 <body>
-<header><h1>家計簿クイック入力</h1></header>
+<header><h1>Kakei-Log</h1></header>
 <nav class="tabs" id="tabs" hidden>
   <button type="button" data-view="input" class="active">入力</button>
   <button type="button" data-view="dash">ダッシュボード</button>
@@ -1439,8 +1439,12 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
      起動時と画面に戻ってきたときに version.json を確認する)
    - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
    ============================================================ */
-var APP_VERSION = '2026-10-12-3';
+var APP_VERSION = '2026-11-02';
 var CHANGELOG = [
+  { version: '2026-11-02', title: 'アプリの名前を「Kakei-Log」にしました', items: [
+    '画面の名前を「家計簿クイック入力」から「Kakei-Log」に変えました。使い方やデータは変わりません',
+    'ホーム画面のアイコンの名前は、追加し直すまで「家計簿」のままのことがあります(そのままでも使えます)'
+  ] },
   { version: '2026-10-12-3', title: '今週分/来週分のボタンを1行に収めました', items: [
     'ボタンの表示を「今週分 10/12〜18」のように短くしました(週は月曜〜日曜です)'
   ] },
