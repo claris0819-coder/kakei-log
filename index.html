@@ -159,6 +159,9 @@
   .login-box { text-align: center; padding: 24px 8px; }
   .login-box p { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 18px; }
   .update-bar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px; background: var(--blue); color: var(--white); padding: 10px 14px; font-size: 13px; font-weight: 700; }
+  .update-bar[hidden] { display: none; }
+  .week-nav-btn { width: 36px; height: 30px; border: 1px solid var(--blue-soft); border-radius: 6px; background: var(--white); color: var(--blue); font-size: 18px; font-weight: 700; line-height: 1; }
+  .week-nav-btn:disabled { opacity: 0.3; }
   .update-bar span { flex: 1; }
   .update-bar.warn { background: #B45309; }
   .update-bar.warn button { color: #B45309; }
@@ -418,8 +421,19 @@ function validateRice(entry, amount) {
   return rice;
 }
 
+// 名前を変えたカテゴリ。古い版のアプリや未送信の記録から古い名前が届いても新しい名前にそろえる
+var RENAMED_CATEGORIES = { 'スーパー(お米含む)': 'スーパー' };
+
+function withCurrentCategory(e) {
+  return RENAMED_CATEGORIES[e.category] ? Object.assign({}, e, { category: RENAMED_CATEGORIES[e.category] }) : e;
+}
+
+async function readLog() {
+  return (await readJson(LOG_FILE_NAME)).map(withCurrentCategory);
+}
+
 async function getInitialData() {
-  var results = await Promise.all([readJson(CONFIG_FILE_NAME), readJson(LOG_FILE_NAME)]);
+  var results = await Promise.all([readJson(CONFIG_FILE_NAME), readLog()]);
   return { config: results[0], log: applyOps(results[1], loadPending()).log };
 }
 
@@ -443,10 +457,10 @@ function applyOps(log, ops) {
   ops.forEach(function(op) {
     var idx = next.findIndex(function(e) { return e.id === op.id; });
     if (op.type === 'add') {
-      if (idx === -1) next.push(op.rec);
+      if (idx === -1) next.push(withCurrentCategory(op.rec));
     } else if (op.type === 'update') {
       if (idx === -1) missed++;
-      else next[idx] = op.rec;
+      else next[idx] = withCurrentCategory(op.rec);
     } else if (op.type === 'delete') {
       if (idx !== -1) next.splice(idx, 1);
     }
@@ -558,7 +572,7 @@ async function flushPending(opts) {
   flushFailed = false;
   renderSyncBar();
   try {
-    var latest = await readJson(LOG_FILE_NAME);
+    var latest = await readLog();
     var applied = applyOps(latest, ops);
     await writeJson(LOG_FILE_NAME, applied.log);
     var sent = {};
@@ -582,7 +596,26 @@ async function flushPending(opts) {
   }
   flushAgain = false;
 }
-document.addEventListener('visibilitychange', function() { if (!document.hidden) flushPending(); });
+
+// 閉じずに戻ったときに日付が変わっていたら画面を作り直す。入力の途中なら、前の日のままの
+// 日付欄だけ今日に直し、画面は次に戻ったときに作り直す
+function refreshForNewDay() {
+  if (!STATE.config || !RENDERED_DAY || VIEW !== 'input') return;
+  var today = ymd(new Date());
+  if (RENDERED_DAY === today) return;
+  if (canRerender()) { render(); return; }
+  var dateEl = document.getElementById('f_date');
+  if (!EDITING_ID && dateEl && dateEl.value === RENDERED_DAY) {
+    dateEl.value = today;
+    dateEl.dispatchEvent(new Event('change'));
+  }
+}
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) return;
+  refreshForNewDay();
+  flushPending();
+});
+window.addEventListener('focus', refreshForNewDay);
 window.addEventListener('online', function() { flushPending(); });
 
 /* ============================================================
@@ -642,7 +675,7 @@ function weekRangeShort(mon) {
   return (mon.getMonth() + 1) + '/' + mon.getDate() + '〜' + (sun.getMonth() === mon.getMonth() ? '' : (sun.getMonth() + 1) + '/') + sun.getDate();
 }
 
-function weeklyStatus(c, log, today) {
+function weeklyStatus(c, log, monday) {
   function spentBetween(start) {
     var key = ymd(start), sum = 0;
     log.forEach(function(e) {
@@ -650,8 +683,6 @@ function weeklyStatus(c, log, today) {
     });
     return sum;
   }
-  var monday = addDays(today, -((today.getDay() + 6) % 7));
-  var sunday = addDays(monday, 6);
   var ownerMonth = monday.getMonth();
   var carryover = 0, weekNo = 1;
   for (var m = addDays(monday, -7); m.getMonth() === ownerMonth; m = addDays(m, -7)) {
@@ -660,11 +691,70 @@ function weeklyStatus(c, log, today) {
   }
   return {
     label: (ownerMonth + 1) + '月第' + weekNo + '週',
-    range: weekRangeLabel(monday),
+    range: weekRangeShort(monday),
     carryover: carryover,
     spent: spentBetween(monday)
   };
 }
+
+// 週予算の表示中の週(月曜の YYYY-MM-DD)。null なら、今月は今週、それ以外の月はその月の最後の週
+var WEEK_VIEW = null;
+
+function weekViewRange(c, log) {
+  var thisMonday = mondayOf(new Date());
+  var min = thisMonday;
+  log.forEach(function(e) {
+    if (e.category !== c.name || !e.date) return;
+    var m = budgetWeekMonday(e);
+    if (m < min) min = m;
+  });
+  return { min: min, max: addDays(thisMonday, 7), thisMonday: thisMonday };
+}
+
+function viewedMonday(c, log) {
+  var r = weekViewRange(c, log);
+  var m;
+  if (WEEK_VIEW) m = parseYmd(WEEK_VIEW);
+  else if (SELECTED_MONTH === localMonthKey(new Date())) m = r.thisMonday;
+  else m = mondayOf(new Date(+SELECTED_MONTH.slice(0, 4), +SELECTED_MONTH.slice(5, 7), 0));
+  if (m < r.min) m = r.min;
+  if (m > r.max) m = r.max;
+  return m;
+}
+
+function weekCardHtml(c, log) {
+  var r = weekViewRange(c, log);
+  var monday = viewedMonday(c, log);
+  var w = weeklyStatus(c, log, monday);
+  var diff = Math.round((monday - r.thisMonday) / 604800000);
+  var name = diff === 0 ? '今週 ' : diff === 1 ? '来週 ' : diff === -1 ? '先週 ' : '';
+  var wPct = Math.min(100, Math.round((w.spent / c.weeklyBudget) * 100));
+  var wBarClass = wPct >= 100 ? 'bad' : (wPct >= 80 ? 'warn' : '');
+  var wRem = c.weeklyBudget - w.spent;
+  function navBtn(dir, label, disabled) {
+    return '<button type="button" class="week-nav-btn" data-week-nav="' + dir + '" aria-label="' + (dir < 0 ? '前の週' : '次の週') + '"' + (disabled ? ' disabled' : '') + '>' + label + '</button>';
+  }
+  return '<div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">' +
+      navBtn(-1, '‹', monday <= r.min) +
+      '<span style="flex:1; text-align:center; font-size:12px; color:var(--muted); font-weight:700;">' + name + escapeHtml(w.label) + '(' + escapeHtml(w.range) + ')</span>' +
+      navBtn(1, '›', monday >= r.max) +
+    '</div>' +
+    '<div class="top" style="font-size:12px;"><span style="color:var(--muted);">使用</span><span class="amt">' + fmtYen(w.spent) + ' / ' + fmtYen(c.weeklyBudget) + '</span></div>' +
+    '<div class="bar-outer"><div class="bar-inner ' + wBarClass + '" style="width:' + wPct + '%"></div></div>' +
+    '<div style="font-size:11px; margin-top:4px; color:var(--muted);">のこり <span style="font-weight:700; color:' + (wRem < 0 ? 'var(--bad)' : 'var(--good)') + ';">' + fmtYen(wRem) + '</span>' +
+    '(繰越 ' + (w.carryover > 0 ? '+' : '') + fmtYen(w.carryover) + ')</div>';
+}
+
+// 週の切り替えは週予算の部分だけ描き直す(入力中の内容を消さないため)
+document.addEventListener('click', function(ev) {
+  var btn = ev.target.closest && ev.target.closest('[data-week-nav]');
+  if (!btn || btn.disabled) return;
+  var card = btn.closest('.week-card');
+  var c = STATE.config.categories.find(function(x) { return x.name === card.dataset.category; });
+  if (!c) return;
+  WEEK_VIEW = ymd(addDays(viewedMonday(c, STATE.log), 7 * Number(btn.dataset.weekNav)));
+  card.innerHTML = weekCardHtml(c, STATE.log);
+});
 
 // 予算判定に使う金額: 「お米を含む」記録はお米代を除く(お米はお米枠で別に管理する)
 function budgetAmount(e) { return Number(e.amount) - (Number(e.riceAmount) || 0); }
@@ -698,7 +788,16 @@ function optionHtml(value, selected, label) {
   return '<option value="' + escapeHtml(value) + '"' + (selected ? ' selected' : '') + '>' + escapeHtml(label == null ? value : label) + '</option>';
 }
 
+// 最後に画面を作った日。閉じずに戻ったときに日付が変わっていないかの判定に使う
+var RENDERED_DAY = null;
+
 function render() {
+  var nowDay = ymd(new Date());
+  if (RENDERED_DAY && RENDERED_DAY !== nowDay) {
+    WEEK_VIEW = null;
+    if (SELECTED_MONTH === RENDERED_DAY.slice(0, 7)) SELECTED_MONTH = nowDay.slice(0, 7);
+  }
+  RENDERED_DAY = nowDay;
   var config = STATE.config;
   var log = STATE.log;
   var usage = monthUsageByCategory(log);
@@ -790,21 +889,10 @@ function render() {
     var used = usage[c.name] || 0;
     var pct = Math.min(100, Math.round((used / c.budget) * 100));
     var barClass = pct >= 100 ? 'bad' : (pct >= 80 ? 'warn' : '');
-    // 週予算を持つカテゴリは、今月表示中のときだけ行の下に今週分を添える。
-    // 予算はあくまで週予算そのもの(繰越は加算せず括弧書きで参考表示)
-    var weekHtml = '';
-    if (c.weeklyBudget > 0 && isCurrentMonth) {
-      var w = weeklyStatus(c, log, today);
-      var wPct = Math.min(100, Math.round((w.spent / c.weeklyBudget) * 100));
-      var wBarClass = wPct >= 100 ? 'bad' : (wPct >= 80 ? 'warn' : '');
-      var wRem = c.weeklyBudget - w.spent;
-      weekHtml = '<div style="margin:8px 0 0 12px; padding-left:10px; border-left:3px solid var(--blue-soft);">' +
-        '<div class="top" style="font-size:12px;"><span style="color:var(--muted); font-weight:700;">今週 ' + w.label + '(' + w.range + ')</span><span class="amt">' + fmtYen(w.spent) + ' / ' + fmtYen(c.weeklyBudget) + '</span></div>' +
-        '<div class="bar-outer"><div class="bar-inner ' + wBarClass + '" style="width:' + wPct + '%"></div></div>' +
-        '<div style="font-size:11px; margin-top:4px; color:var(--muted);">のこり <span style="font-weight:700; color:' + (wRem < 0 ? 'var(--bad)' : 'var(--good)') + ';">' + fmtYen(wRem) + '</span>' +
-        '(繰越 ' + (w.carryover > 0 ? '+' : '') + fmtYen(w.carryover) + ')</div>' +
-      '</div>';
-    }
+    // 週予算を持つカテゴリは、行の下に週ごとの状況を添える(‹ › で週を切り替え)
+    var weekHtml = c.weeklyBudget > 0
+      ? '<div class="week-card" data-category="' + escapeHtml(c.name) + '" style="margin:8px 0 0 12px; padding-left:10px; border-left:3px solid var(--blue-soft);">' + weekCardHtml(c, log) + '</div>'
+      : '';
     var riceHtml = '';
     var rp = ricePool(c, log, SELECTED_MONTH);
     if (rp) {
@@ -841,7 +929,7 @@ function render() {
     });
   var recent = monthEntries.map(function(e) {
     return '<tr class="recent-row"><td style="white-space:nowrap;">' + escapeHtml(mdw(parseYmd(e.date))) + '</td><td>' + escapeHtml(e.payer) + '</td><td class="wrap">' + escapeHtml(e.category) + (e.riceAmount ? '<br><span style="font-size:11px; color:var(--muted);">うちお米代 ' + fmtYen(e.riceAmount) + '</span>' : '') +
-      (weeklyCategoryNames[e.category] && (e.budgetWeek || defaultBudgetWeek(e.date)) === 'next' ? '<br><span style="font-size:11px; color:var(--blue);">来週分</span>' : '') + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
+      (weeklyCategoryNames[e.category] ? '<br><span style="font-size:11px; color:var(--blue);">' + escapeHtml(weekRangeShort(budgetWeekMonday(e))) + '分</span>' : '') + '</td><td>' + fmtYen(e.amount) + '</td><td>' + escapeHtml(e.paymentMethod) + '</td><td class="wrap">' + escapeHtml(e.memo || '') + '</td>' +
       '<td class="op-cell"><button type="button" class="icon-btn edit" data-edit="' + escapeHtml(e.id) + '">✎</button><button type="button" class="icon-btn danger" data-del="' + escapeHtml(e.id) + '">✕</button></td></tr>';
   }).join('');
 
@@ -937,9 +1025,11 @@ function render() {
     if (!show) return;
     if (!weekChosenByHand) weekChoice = defaultBudgetWeek(dateInput.value);
     var mon = mondayOf(parseYmd(dateInput.value));
+    // 「今週・来週」と呼べるのは今週の日付のときだけ。それ以外の日付は期間だけを表示する
+    var isThisWeek = ymd(mon) === ymd(mondayOf(new Date()));
     document.querySelectorAll('.week-opt').forEach(function(b) {
       var isNext = b.dataset.week === 'next';
-      b.textContent = (isNext ? '来週分 ' : '今週分 ') + weekRangeShort(isNext ? addDays(mon, 7) : mon);
+      b.textContent = (isThisWeek ? (isNext ? '来週分 ' : '今週分 ') : '') + weekRangeShort(isNext ? addDays(mon, 7) : mon);
       b.classList.toggle('active', b.dataset.week === weekChoice);
     });
   }
@@ -971,6 +1061,7 @@ function render() {
   document.getElementById('refreshBtn').addEventListener('click', refreshData);
   document.getElementById('monthSelect').addEventListener('change', function() {
     SELECTED_MONTH = this.value;
+    WEEK_VIEW = null;
     render();
   });
   document.getElementById('logoutBtn').addEventListener('click', function() {
@@ -1549,8 +1640,17 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
      起動時と画面に戻ってきたときに version.json を確認する)
    - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
    ============================================================ */
-var APP_VERSION = '2026-11-03';
+var APP_VERSION = '2026-11-03-2';
 var CHANGELOG = [
+  { version: '2026-11-03-2', title: '週予算の表示を見やすくしました', items: [
+    '入力一覧のスーパーの記録に「10/19〜25分」のように、どの週の予算に入っているかを表示します',
+    'カテゴリ名「スーパー(お米含む)」を「スーパー」に変えました',
+    '過去の記録を編集するときは、「今週分・来週分」ではなく期間だけを表示します',
+    'スーパーの週予算を ‹ › で切り替えて、過去の週と来週の残りを確認できるようにしました。過去の月を表示しているときも見られます',
+    '週予算の金額や計算は変わりません',
+    '閉じずにアプリへ戻ったとき、日付が変わっていれば今日の日付に直します',
+    '画面上部に出ていた空の青い帯を消しました'
+  ] },
   { version: '2026-11-03', title: '記録がすぐ完了するようになりました', items: [
     '確定を押すとすぐ記録され、すぐアプリを閉じても消えなくなりました',
     '送信は裏で行います。送れなかった分は画面上部に「未送信」と表示し、次に開いたときに自動で送信します',
