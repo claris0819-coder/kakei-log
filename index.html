@@ -40,7 +40,13 @@
     padding: 14px 16px;
     padding-top: calc(14px + env(safe-area-inset-top));
   }
+  header { display: flex; align-items: center; justify-content: space-between; }
   header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+  body.space-personal header { background: #0F5C4D; }
+  .space-switch { display: inline-flex; border: 1px solid rgba(255,255,255,0.45); border-radius: 6px; overflow: hidden; }
+  .space-switch[hidden] { display: none; }
+  .space-switch button { background: transparent; color: #fff; border: none; padding: 5px 12px; font-size: 12px; font-weight: 700; }
+  .space-switch button.active { background: #fff; color: var(--navy); }
   main { padding: 14px; max-width: 480px; margin: 0 auto; padding-bottom: 60px; }
   .card {
     background: var(--white);
@@ -205,7 +211,7 @@
 </style>
 </head>
 <body>
-<header><h1>Kakei-Log</h1></header>
+<header><h1>Kakei-Log</h1><div class="space-switch" id="spaceSwitch" hidden><button type="button" data-space="shared">共通</button><button type="button" data-space="personal">個人</button></div></header>
 <nav class="tabs" id="tabs" hidden>
   <button type="button" data-view="input" class="active">入力</button>
   <button type="button" data-view="dash">ダッシュボード</button>
@@ -229,8 +235,24 @@
    ============================================================ */
 var CLIENT_ID = '567180524960-j5nsf5h2n29jqa0dqlblvbjqqqgalim3.apps.googleusercontent.com';
 var SCOPE = 'https://www.googleapis.com/auth/drive';
-var LOG_FILE_NAME = '入力アプリ_ログ.json';
-var CONFIG_FILE_NAME = '入力アプリ_config.json';
+// 共通/個人。個人用のファイルは各自のドライブの非共有フォルダに置くので、もう1人からは読めない。
+// 切り替えは画面を開き直して行い、未送信の記録も共通と個人で別々に持つ
+var SPACE_KEY = 'kakeiSpace';
+var IS_PERSONAL = storageGet(SPACE_KEY) === 'personal';
+var SPACE_KEY_SUFFIX = IS_PERSONAL ? '_personal' : '';
+var PERSONAL_FOLDER_NAME = 'Kakei-Log_個人';
+var PERSONAL_PREFIX = '個人_';
+var SHARED_LOG_FILE_NAME = '入力アプリ_ログ.json';
+var PERSONAL_LOG_FILE_NAME = '個人_入力ログ.json';
+var LOG_FILE_NAME = IS_PERSONAL ? PERSONAL_LOG_FILE_NAME : SHARED_LOG_FILE_NAME;
+var CONFIG_FILE_NAME = IS_PERSONAL ? '個人_入力設定.json' : '入力アプリ_config.json';
+// PCアプリの個人用の初期カテゴリと同じ。予算はPCアプリで設定すると上書きされる
+var PERSONAL_DEFAULT_CONFIG = {
+  payers: ['自分'],
+  paymentMethods: ['カード', '現金'],
+  categories: [],
+  allCategories: [{ parent: '外食', name: '外食' }, { parent: '趣味', name: '趣味' }, { parent: '日用品', name: '日用品' }, { parent: 'その他', name: 'その他' }]
+};
 var REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
 
 var TOKEN_KEY = 'kakeiToken';
@@ -241,7 +263,8 @@ var FILE_IDS_KEY = 'kakeiFileIds';
 // 「アカウントを選択」画面でタップしなくても自動で同じアカウントが選ばれるようにする
 var LOGIN_HINT_KEY = 'kakeiLoginHint';
 // ドライブにまだ送れていない入力(追加・更新・削除)
-var PENDING_KEY = 'kakeiPendingOps';
+var PENDING_KEY = 'kakeiPendingOps' + SPACE_KEY_SUFFIX;
+var OTHER_PENDING_KEY = 'kakeiPendingOps' + (IS_PERSONAL ? '' : '_personal');
 
 function storageGet(key) {
   try { return localStorage.getItem(key); } catch (e) { return null; }
@@ -302,7 +325,7 @@ function getValidToken() {
 }
 
 function logout() {
-  if (loadPending().length && !confirm('まだ送信できていない記録があります。ログアウトすると、次にログインするまで送信されません。ログアウトしますか?')) return;
+  if ((loadPending().length || storageGet(OTHER_PENDING_KEY)) && !confirm('まだ送信できていない記録があります。ログアウトすると、次にログインするまで送信されません。ログアウトしますか?')) return;
   storageRemove(TOKEN_KEY);
   storageRemove(SIGNED_IN_KEY);
   storageRemove(FILE_IDS_KEY);
@@ -354,22 +377,76 @@ function loadFileIds() {
   try { return JSON.parse(storageGet(FILE_IDS_KEY) || '{}'); } catch (e) { return {}; }
 }
 
-async function findFileId(name, forceSearch) {
-  var ids = loadFileIds();
-  if (ids[name] && !forceSearch) return ids[name];
-  var q = "name = '" + name.replace(/'/g, "\\'") + "' and trashed = false";
+// 個人用のファイルは自分が持っているものだけを探す(共有されたものを誤って使わないため)
+async function searchDriveId(name, extraQuery) {
+  var q = "name = '" + name.replace(/'/g, "\\'") + "' and trashed = false" + (extraQuery || '');
   var url = 'https://www.googleapis.com/drive/v3/files?pageSize=10&orderBy=modifiedTime desc' +
     '&fields=' + encodeURIComponent('files(id,name,modifiedTime)') + '&q=' + encodeURIComponent(q);
   var res = await driveFetch(url);
   if (!res.ok) throw new Error('Googleドライブでファイルを探せませんでした(' + res.status + ')');
   var data = await res.json();
-  if (!data.files || data.files.length === 0) {
-    throw new Error('Googleドライブに「' + name + '」が見つかりません。このGoogleアカウントにファイルが共有されているか確認してください。');
-  }
   // 同名ファイルが複数ある場合は最も新しく更新されたものを使う
-  ids[name] = data.files[0].id;
+  return data.files && data.files.length ? data.files[0].id : null;
+}
+
+function rememberFileId(name, id) {
+  var ids = loadFileIds();
+  ids[name] = id;
   storageSet(FILE_IDS_KEY, JSON.stringify(ids));
-  return ids[name];
+}
+
+async function findFileId(name, forceSearch) {
+  var ids = loadFileIds();
+  if (ids[name] && !forceSearch) return ids[name];
+  var id = await searchDriveId(name, name.indexOf(PERSONAL_PREFIX) === 0 ? " and 'me' in owners" : '');
+  if (!id) {
+    throw new Error('Googleドライブに「' + name + '」が見つかりません。' + (name.indexOf(PERSONAL_PREFIX) === 0
+      ? 'PCアプリの個人用で「' + PERSONAL_FOLDER_NAME + '」フォルダを開くと作られます。'
+      : 'このGoogleアカウントにファイルが共有されているか確認してください。'));
+  }
+  rememberFileId(name, id);
+  return id;
+}
+
+// 個人用のフォルダとファイルが無ければ作る
+async function ensurePersonalFiles() {
+  var folderQuery = " and mimeType = 'application/vnd.google-apps.folder' and 'me' in owners";
+  var ownedFile = " and 'me' in owners";
+  var ids = loadFileIds();
+  if (ids[LOG_FILE_NAME] && ids[CONFIG_FILE_NAME]) return;
+  var folderId = await searchDriveId(PERSONAL_FOLDER_NAME, folderQuery);
+  if (!folderId) {
+    var res = await driveFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ name: PERSONAL_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' })
+    });
+    if (!res.ok) throw new Error('個人用のフォルダを作れませんでした(' + res.status + ')');
+    folderId = (await res.json()).id;
+  }
+  var defaults = [[LOG_FILE_NAME, []], [CONFIG_FILE_NAME, PERSONAL_DEFAULT_CONFIG]];
+  for (var i = 0; i < defaults.length; i++) {
+    var name = defaults[i][0];
+    var id = await searchDriveId(name, ownedFile);
+    if (!id) id = await createJsonFile(name, folderId, defaults[i][1]);
+    rememberFileId(name, id);
+  }
+}
+
+// 中身が空のファイルを残さないよう、作成と書き込みを1回で行う
+async function createJsonFile(name, folderId, obj) {
+  var boundary = 'kakeilog' + Date.now();
+  var body = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify({ name: name, parents: [folderId], mimeType: 'application/json' }) +
+    '\r\n--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(obj, null, 2) + '\r\n--' + boundary + '--';
+  var res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST',
+    headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+    body: body
+  });
+  if (!res.ok) throw new Error('「' + name + '」を作れませんでした(' + res.status + ')');
+  return (await res.json()).id;
 }
 
 async function readJson(name) {
@@ -428,11 +505,12 @@ function withCurrentCategory(e) {
   return RENAMED_CATEGORIES[e.category] ? Object.assign({}, e, { category: RENAMED_CATEGORIES[e.category] }) : e;
 }
 
-async function readLog() {
-  return (await readJson(LOG_FILE_NAME)).map(withCurrentCategory);
+async function readLog(name) {
+  return (await readJson(name || LOG_FILE_NAME)).map(withCurrentCategory);
 }
 
 async function getInitialData() {
+  if (IS_PERSONAL) await ensurePersonalFiles();
   var results = await Promise.all([readJson(CONFIG_FILE_NAME), readLog()]);
   return { config: results[0], log: applyOps(results[1], loadPending()).log };
 }
@@ -597,6 +675,38 @@ async function flushPending(opts) {
   flushAgain = false;
 }
 
+// もう一方(共通/個人)の未送信の記録も送る。切り替えたあと戻らなくても届くように
+var otherFlushBusy = false;
+async function flushOtherSpace() {
+  if (otherFlushBusy || !getValidToken()) return;
+  var ops;
+  try { ops = JSON.parse(storageGet(OTHER_PENDING_KEY) || '[]'); } catch (e) { return; }
+  if (!ops.length) return;
+  otherFlushBusy = true;
+  try {
+    var name = IS_PERSONAL ? SHARED_LOG_FILE_NAME : PERSONAL_LOG_FILE_NAME;
+    await writeJson(name, applyOps(await readLog(name), ops).log);
+    storageRemove(OTHER_PENDING_KEY);
+  } catch (e) { /* 次の機会に送る */ }
+  otherFlushBusy = false;
+}
+
+function setupSpaceSwitch() {
+  document.body.classList.toggle('space-personal', IS_PERSONAL);
+  if (IS_PERSONAL) document.querySelector('header h1').textContent = 'Kakei-Log 個人';
+  var box = document.getElementById('spaceSwitch');
+  box.hidden = false;
+  box.querySelectorAll('button').forEach(function(b) {
+    var personal = b.dataset.space === 'personal';
+    b.classList.toggle('active', personal === IS_PERSONAL);
+    b.addEventListener('click', function() {
+      if (personal === IS_PERSONAL) return;
+      if (personal) storageSet(SPACE_KEY, 'personal'); else storageRemove(SPACE_KEY);
+      location.reload();
+    });
+  });
+}
+
 // 閉じずに戻ったときに日付が変わっていたら画面を作り直す。入力の途中なら、前の日のままの
 // 日付欄だけ今日に直し、画面は次に戻ったときに作り直す
 function refreshForNewDay() {
@@ -614,6 +724,7 @@ document.addEventListener('visibilitychange', function() {
   if (document.hidden) return;
   refreshForNewDay();
   flushPending();
+  flushOtherSpace();
 });
 window.addEventListener('focus', refreshForNewDay);
 window.addEventListener('online', function() { flushPending(); });
@@ -812,8 +923,8 @@ function render() {
   var editingEntry = EDITING_ID ? log.find(function(e) { return e.id === EDITING_ID; }) : null;
   if (EDITING_ID && !editingEntry) EDITING_ID = null;
 
-  var savedPayer = storageGet('lastPayer') || config.payers[0];
-  var savedMethod = storageGet('lastMethod') || config.paymentMethods[0];
+  var savedPayer = storageGet('lastPayer' + SPACE_KEY_SUFFIX) || config.payers[0];
+  var savedMethod = storageGet('lastMethod' + SPACE_KEY_SUFFIX) || config.paymentMethods[0];
   var today = new Date();
   var todayStr = ymd(today);
 
@@ -961,7 +1072,7 @@ function render() {
       '<form id="entryForm">' +
         '<div class="row2">' +
           '<div class="field"><label>日付 <span id="f_date_wd" style="color:var(--blue);"></span></label><input type="date" id="f_date" value="' + escapeHtml(defaultDate) + '"></div>' +
-          '<div class="field"><label>支払者</label><select id="f_payer">' + payerOptions + '</select></div>' +
+          '<div class="field"' + (config.payers.length === 1 ? ' style="display:none;"' : '') + '><label>支払者</label><select id="f_payer">' + payerOptions + '</select></div>' +
         '</div>' +
         '<div class="field"><label>カテゴリ</label><select id="f_category">' + categoryOptions + '</select></div>' +
         // 週予算のあるカテゴリ(スーパー)のときだけ出す。どの週の予算に入れるか
@@ -1131,8 +1242,8 @@ async function onSubmit(ev) {
   entry.riceAmount = document.getElementById('f_rice').value;
   entry.budgetWeek = STATE.getWeekChoice ? STATE.getWeekChoice() : null;
 
-  storageSet('lastPayer', entry.payer);
-  storageSet('lastMethod', entry.paymentMethod);
+  storageSet('lastPayer' + SPACE_KEY_SUFFIX, entry.payer);
+  storageSet('lastMethod' + SPACE_KEY_SUFFIX, entry.paymentMethod);
 
   var wasEditing = !!EDITING_ID;
   try {
@@ -1157,7 +1268,7 @@ async function onSubmit(ev) {
    振替は常に除外、計算対象を外した取引(t.excluded)も除外、純資産は
    銀行・証券の残高(その月以前で最後に記録された残高)− カードのその月の利用額
    ============================================================ */
-var ASSET_FILE_NAME = '資産データ.json';
+var ASSET_FILE_NAME = IS_PERSONAL ? '個人_資産データ.json' : '資産データ.json';
 var TRANSFER_CATEGORY = '振替';
 var VIEW = 'input';
 var DASH = { asset: null, savedAt: null, month: null, expanded: {} };
@@ -1190,7 +1301,7 @@ async function showDashboard(forceReload) {
       if (VIEW !== 'dash') return;
       document.getElementById('app').innerHTML =
         '<div class="card login-box"><p>' + escapeHtml(err.message || String(err)) +
-        '<br>(ダッシュボードは「資産データ.json」を共有されたアカウントだけが見られます)</p>' +
+        (IS_PERSONAL ? '' : '<br>(ダッシュボードは「資産データ.json」を共有されたアカウントだけが見られます)') + '</p>' +
         '<button type="button" class="btn" id="dashRetryBtn">再読み込み</button></div>';
       document.getElementById('dashRetryBtn').addEventListener('click', function() { showDashboard(true); });
       return;
@@ -1640,8 +1751,13 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
      起動時と画面に戻ってきたときに version.json を確認する)
    - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
    ============================================================ */
-var APP_VERSION = '2026-11-03-2';
+var APP_VERSION = '2026-11-03-3';
 var CHANGELOG = [
+  { version: '2026-11-03-3', title: '個人用を追加しました', items: [
+    '画面右上の「共通/個人」で切り替えます。今までの家計は「共通」で、使い方は変わりません',
+    '「個人」のデータは自分のGoogleドライブに保存され、もう1人からは見えません',
+    '「個人」を初めて開くと、自分のドライブに「Kakei-Log_個人」フォルダを作ります'
+  ] },
   { version: '2026-11-03-2', title: '週予算の表示を見やすくしました', items: [
     '入力一覧のスーパーの記録に「10/19〜25分」のように、どの週の予算に入っているかを表示します',
     'カテゴリ名「スーパー(お米含む)」を「スーパー」に変えました',
@@ -1731,6 +1847,7 @@ async function boot() {
     document.getElementById('app').innerHTML = '<div class="card login-box"><p>ログイン設定(クライアントID)がまだ入っていません。</p></div>';
     return;
   }
+  setupSpaceSwitch();
   var fromUrl = takeTokenFromUrl();
   if (fromUrl && fromUrl.error) {
     showLogin(fromUrl.error === 'access_denied'
@@ -1756,6 +1873,7 @@ async function boot() {
     showWhatsNew(false);
     rememberLoginHint();
     flushPending({ allowLogin: true });
+    flushOtherSpace();
   } catch (err) {
     document.getElementById('app').innerHTML =
       '<div class="card login-box"><p>' + escapeHtml(err.message || String(err)) + '</p>' +
