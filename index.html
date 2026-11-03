@@ -160,6 +160,8 @@
   .login-box p { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 18px; }
   .update-bar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px; background: var(--blue); color: var(--white); padding: 10px 14px; font-size: 13px; font-weight: 700; }
   .update-bar span { flex: 1; }
+  .update-bar.warn { background: #B45309; }
+  .update-bar.warn button { color: #B45309; }
   .update-bar button { background: var(--white); color: var(--blue); border: none; border-radius: 6px; padding: 6px 12px; font-weight: 700; font-size: 13px; }
   .whats-new { max-width: 720px; margin: 12px auto 0; padding: 0 12px; }
   .whats-new .card { border: 2px solid var(--blue); }
@@ -206,6 +208,7 @@
   <button type="button" data-view="dash">ダッシュボード</button>
 </nav>
 <div id="updateBar" class="update-bar" hidden></div>
+<div id="syncBar" class="update-bar" hidden></div>
 <div id="whatsNew"></div>
 <main id="app">
   <div class="loading" id="loading">読み込み中...</div>
@@ -234,6 +237,8 @@ var FILE_IDS_KEY = 'kakeiFileIds';
 // 前回ログインしたGoogleアカウントのメールアドレス。再ログイン時にlogin_hintとして渡し、
 // 「アカウントを選択」画面でタップしなくても自動で同じアカウントが選ばれるようにする
 var LOGIN_HINT_KEY = 'kakeiLoginHint';
+// ドライブにまだ送れていない入力(追加・更新・削除)
+var PENDING_KEY = 'kakeiPendingOps';
 
 function storageGet(key) {
   try { return localStorage.getItem(key); } catch (e) { return null; }
@@ -294,6 +299,7 @@ function getValidToken() {
 }
 
 function logout() {
+  if (loadPending().length && !confirm('まだ送信できていない記録があります。ログアウトすると、次にログインするまで送信されません。ログアウトしますか?')) return;
   storageRemove(TOKEN_KEY);
   storageRemove(SIGNED_IN_KEY);
   storageRemove(FILE_IDS_KEY);
@@ -414,62 +420,170 @@ function validateRice(entry, amount) {
 
 async function getInitialData() {
   var results = await Promise.all([readJson(CONFIG_FILE_NAME), readJson(LOG_FILE_NAME)]);
-  return { config: results[0], log: results[1] };
+  return { config: results[0], log: applyOps(results[1], loadPending()).log };
 }
 
-// 書き込みの直前に最新のログを読み直してから追加・更新する(2人がほぼ同時に
-// 保存した場合に片方が消えるのを減らすため。Apps Script版のような排他ロックは無い)
-async function submitEntry(entry) {
-  var amount = validateEntry(entry);
-  var rice = validateRice(entry, amount);
-  var log = await readJson(LOG_FILE_NAME);
-  var rec = {
-    id: crypto.randomUUID(),
-    date: entry.date,
-    payer: entry.payer,
-    category: entry.category,
-    amount: amount,
-    memo: entry.memo || '',
-    paymentMethod: entry.paymentMethod,
-    createdAt: new Date().toISOString()
-  };
-  if (rice) rec.riceAmount = rice;
-  if (entry.budgetWeek) rec.budgetWeek = entry.budgetWeek;
-  log.push(rec);
-  await writeJson(LOG_FILE_NAME, log);
-  return { config: STATE.config, log: log };
+/* ---------- 未送信の記録 ----------
+   確定を押した時点で端末に保存し、ドライブへの送信は裏で行う。送信前や送信中にアプリを
+   閉じても、次に開いたときに送り直すので記録は消えない。送り直しても二重にならないよう、
+   操作は記録のidを基準に適用する。書き込み直前に最新のログを読み直すのは以前と同じで、
+   Apps Script版のような排他ロックは無い */
+function loadPending() {
+  try { return JSON.parse(storageGet(PENDING_KEY) || '[]'); } catch (e) { return []; }
 }
 
-async function updateEntry(id, entry) {
-  var amount = validateEntry(entry);
-  var rice = validateRice(entry, amount);
-  var log = await readJson(LOG_FILE_NAME);
-  var idx = log.findIndex(function(e) { return e.id === id; });
-  if (idx === -1) throw new Error('対象の記録が見つかりません(既に削除された可能性があります)');
-  log[idx] = {
+function savePending(ops) {
+  if (ops.length) storageSet(PENDING_KEY, JSON.stringify(ops));
+  else storageRemove(PENDING_KEY);
+}
+
+function applyOps(log, ops) {
+  var next = log.slice();
+  var missed = 0;
+  ops.forEach(function(op) {
+    var idx = next.findIndex(function(e) { return e.id === op.id; });
+    if (op.type === 'add') {
+      if (idx === -1) next.push(op.rec);
+    } else if (op.type === 'update') {
+      if (idx === -1) missed++;
+      else next[idx] = op.rec;
+    } else if (op.type === 'delete') {
+      if (idx !== -1) next.splice(idx, 1);
+    }
+  });
+  return { log: next, missed: missed };
+}
+
+function queueOp(type, id, rec) {
+  var op = { opId: crypto.randomUUID(), type: type, id: id };
+  if (rec) op.rec = rec;
+  savePending(loadPending().concat([op]));
+  var saved = loadPending().some(function(o) { return o.opId === op.opId; });
+  if (!saved) throw new Error('端末に保存できませんでした。もう一度お試しください。');
+  STATE.log = applyOps(STATE.log, [op]).log;
+}
+
+function buildRecord(entry, id, amount) {
+  return {
     id: id,
     date: entry.date,
     payer: entry.payer,
     category: entry.category,
     amount: amount,
     memo: entry.memo || '',
-    paymentMethod: entry.paymentMethod,
-    createdAt: log[idx].createdAt,
-    updatedAt: new Date().toISOString()
+    paymentMethod: entry.paymentMethod
   };
-  if (rice) log[idx].riceAmount = rice;
-  if (entry.budgetWeek) log[idx].budgetWeek = entry.budgetWeek;
-  await writeJson(LOG_FILE_NAME, log);
-  return { config: STATE.config, log: log };
 }
 
-async function deleteEntry(id) {
-  var log = await readJson(LOG_FILE_NAME);
-  var next = log.filter(function(e) { return e.id !== id; });
-  if (next.length === log.length) throw new Error('対象の記録が見つかりません(既に削除された可能性があります)');
-  await writeJson(LOG_FILE_NAME, next);
-  return { config: STATE.config, log: next };
+function submitEntry(entry) {
+  var amount = validateEntry(entry);
+  var rice = validateRice(entry, amount);
+  var rec = buildRecord(entry, crypto.randomUUID(), amount);
+  rec.createdAt = new Date().toISOString();
+  if (rice) rec.riceAmount = rice;
+  if (entry.budgetWeek) rec.budgetWeek = entry.budgetWeek;
+  queueOp('add', rec.id, rec);
 }
+
+function updateEntry(id, entry) {
+  var amount = validateEntry(entry);
+  var rice = validateRice(entry, amount);
+  var current = STATE.log.find(function(e) { return e.id === id; });
+  if (!current) throw new Error('対象の記録が見つかりません(既に削除された可能性があります)');
+  var rec = buildRecord(entry, id, amount);
+  rec.createdAt = current.createdAt;
+  rec.updatedAt = new Date().toISOString();
+  if (rice) rec.riceAmount = rice;
+  if (entry.budgetWeek) rec.budgetWeek = entry.budgetWeek;
+  queueOp('update', id, rec);
+}
+
+function deleteEntry(id) {
+  queueOp('delete', id);
+}
+
+var flushBusy = false, flushAgain = false, flushFailed = false, flushMissed = 0, flushRetryTimer = null;
+
+// 入力の途中なら画面を描き直さない(入力中の内容が消えるため)
+function canRerender() {
+  if (VIEW !== 'input' || EDITING_ID) return false;
+  var active = document.activeElement;
+  if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return false;
+  var amount = document.getElementById('f_amount');
+  var memo = document.getElementById('f_memo');
+  return !(amount && amount.value) && !(memo && memo.value);
+}
+
+function renderKeepingMsg() {
+  var m = document.getElementById('msg');
+  var cls = m ? m.className : '', text = m ? m.textContent : '';
+  render();
+  m = document.getElementById('msg');
+  if (m) { m.className = cls; m.textContent = text; }
+}
+
+function renderSyncBar() {
+  var bar = document.getElementById('syncBar');
+  var n = loadPending().length;
+  var html = '';
+  bar.className = 'update-bar';
+  if (flushMissed) {
+    bar.className = 'update-bar warn';
+    html = '<span>別の端末で削除された記録への変更 ' + flushMissed + '件は反映できませんでした</span><button type="button" id="syncBarBtn">OK</button>';
+  } else if (n && !flushBusy) {
+    bar.className = 'update-bar warn';
+    html = '<span>未送信 ' + n + '件。記録は端末に保存済みで、次に開いたときにも自動で送信します</span><button type="button" id="syncBarBtn">今すぐ送信</button>';
+  } else if (n) {
+    html = '<span>送信中(' + n + '件)。閉じても、次に開いたときに送信します</span>';
+  }
+  bar.innerHTML = html;
+  bar.hidden = !html;
+  var btn = document.getElementById('syncBarBtn');
+  if (btn) btn.addEventListener('click', function() {
+    if (flushMissed) { flushMissed = 0; renderSyncBar(); }
+    else flushPending({ allowLogin: true });
+  });
+}
+
+// allowLogin: ログインが切れていたらGoogleのログイン画面へ移動してよいか。
+// 画面に戻っただけのときは、入力の途中で移動してしまわないよう false にする
+async function flushPending(opts) {
+  opts = opts || {};
+  if (flushBusy) { flushAgain = true; return; }
+  var ops = loadPending();
+  if (!ops.length) { renderSyncBar(); return; }
+  if (!getValidToken() && !opts.allowLogin) { renderSyncBar(); return; }
+  clearTimeout(flushRetryTimer);
+  flushBusy = true;
+  flushFailed = false;
+  renderSyncBar();
+  try {
+    var latest = await readJson(LOG_FILE_NAME);
+    var applied = applyOps(latest, ops);
+    await writeJson(LOG_FILE_NAME, applied.log);
+    var sent = {};
+    ops.forEach(function(o) { sent[o.opId] = true; });
+    var rest = loadPending().filter(function(o) { return !sent[o.opId]; });
+    savePending(rest);
+    flushMissed += applied.missed;
+    var nextLog = applyOps(applied.log, rest).log;
+    var changed = JSON.stringify(nextLog) !== JSON.stringify(STATE.log);
+    STATE.log = nextLog;
+    if (changed && STATE.config && canRerender()) renderKeepingMsg();
+  } catch (err) {
+    flushFailed = true;
+    flushRetryTimer = setTimeout(flushPending, 30000);
+  }
+  flushBusy = false;
+  renderSyncBar();
+  if (!flushFailed && (flushAgain || loadPending().length)) {
+    flushAgain = false;
+    flushPending(opts);
+  }
+  flushAgain = false;
+}
+document.addEventListener('visibilitychange', function() { if (!document.hidden) flushPending(); });
+window.addEventListener('online', function() { flushPending(); });
 
 /* ============================================================
    画面(旧Apps Script版 v7 の Index.html と同じ内容)
@@ -873,6 +987,7 @@ async function refreshData() {
     STATE.config = data.config;
     STATE.log = data.log;
     render();
+    flushPending({ allowLogin: true });
   } catch (err) {
     if (btn) { btn.disabled = false; btn.textContent = '⟳ 更新'; }
     alert(err.message || String(err));
@@ -893,12 +1008,12 @@ function cancelEdit() {
 async function onDelete(id) {
   if (!confirm('この記録を削除しますか?')) return;
   try {
-    var result = await deleteEntry(id);
-    STATE.log = result.log;
+    deleteEntry(id);
     if (EDITING_ID === id) EDITING_ID = null;
     render();
     var m = document.getElementById('msg');
     if (m) { m.className = 'msg ok'; m.textContent = '削除しました'; }
+    flushPending({ allowLogin: true });
   } catch (err) {
     alert(err.message || String(err));
   }
@@ -925,23 +1040,18 @@ async function onSubmit(ev) {
   entry.riceAmount = document.getElementById('f_rice').value;
   entry.budgetWeek = STATE.getWeekChoice ? STATE.getWeekChoice() : null;
 
-  btn.disabled = true;
-  btn.textContent = '送信中...';
-
   storageSet('lastPayer', entry.payer);
   storageSet('lastMethod', entry.paymentMethod);
 
   var wasEditing = !!EDITING_ID;
   try {
-    var result = wasEditing ? await updateEntry(EDITING_ID, entry) : await submitEntry(entry);
-    STATE.log = result.log;
+    if (wasEditing) updateEntry(EDITING_ID, entry); else submitEntry(entry);
     EDITING_ID = null;
     render();
     var m = document.getElementById('msg');
     if (m) { m.className = 'msg ok'; m.textContent = wasEditing ? '更新しました' : '記録しました'; }
+    flushPending({ allowLogin: true });
   } catch (err) {
-    btn.disabled = false;
-    btn.textContent = wasEditing ? '更新' : '確定';
     msg.className = 'msg err';
     msg.textContent = err.message || String(err);
   }
@@ -1439,8 +1549,13 @@ document.querySelectorAll('#tabs button').forEach(function(b) {
      起動時と画面に戻ってきたときに version.json を確認する)
    - 新しい版で初めて開いたときに、前回見た版以降の更新内容を1回だけ表示する
    ============================================================ */
-var APP_VERSION = '2026-11-02';
+var APP_VERSION = '2026-11-03';
 var CHANGELOG = [
+  { version: '2026-11-03', title: '記録がすぐ完了するようになりました', items: [
+    '確定を押すとすぐ記録され、すぐアプリを閉じても消えなくなりました',
+    '送信は裏で行います。送れなかった分は画面上部に「未送信」と表示し、次に開いたときに自動で送信します',
+    'もう1人のスマホやPCに届くのは、送信が終わってからです'
+  ] },
   { version: '2026-11-02', title: 'アプリの名前を「Kakei-Log」にしました', items: [
     '画面の名前を「家計簿クイック入力」から「Kakei-Log」に変えました。使い方やデータは変わりません',
     'ホーム画面のアイコンの名前は、追加し直すまで「家計簿」のままのことがあります(そのままでも使えます)'
@@ -1540,6 +1655,7 @@ async function boot() {
     render();
     showWhatsNew(false);
     rememberLoginHint();
+    flushPending({ allowLogin: true });
   } catch (err) {
     document.getElementById('app').innerHTML =
       '<div class="card login-box"><p>' + escapeHtml(err.message || String(err)) + '</p>' +
